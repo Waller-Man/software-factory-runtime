@@ -1,0 +1,4 @@
+{
+  "compilerOptions": { "target": "ES2024", "module": "ESNext", "moduleResolution": "Bundler", "strict": true, "skipLibCheck": true, "composite": true, "declaration": true, "rootDir": "src", "outDir": "lib", "rewriteRelativeImportExtensions": true, "types": ["node"], "baseUrl": ".", "paths": { "@software-factory/runtime-sdk": ["../runtime-sdk/src/index.ts"] }, "ignoreDeprecations": "6.0" },
+  "references": [{ "path": "../contracts" }, { "path": "../runtime-sdk" }], "include": ["src/**/*.ts"]
+}

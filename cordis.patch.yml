@@ -1,0 +1,3 @@
+- insert:
+    - id: sf-runtime
+      name: '@software-factory/runtime'

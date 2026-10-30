@@ -1,0 +1,48 @@
+# Dependencies and local caches
+node_modules/
+.npm/
+.cache/
+
+# Generated code and distribution packages
+/lib/
+/dist/
+/artifacts/
+/release/
+/releases/
+/*.tgz
+/*.zip
+*.tsbuildinfo
+
+# Tests and temporary files
+/coverage/
+/test-results/
+/tmp/
+/temp/
+*.log
+*.tmp
+
+# Task data, local DSH profiles and credentials
+/outputs/
+/workspaces/
+/.dsh/
+/profile/
+credentials.json
+connection.private.json
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local editor and OS state
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Keep source, docs, package.json, lockfiles, cordis.patch.yml,
+# locales, icon.svg and THIRD_PARTY_NOTICES.md in Git.
