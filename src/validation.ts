@@ -32,4 +32,8 @@ export const modelRequest = z.object({ messages: z.array(z.discriminatedUnion('r
   z.object({ role: z.literal('system'), content: z.string() }).strict(),
   z.object({ role: z.literal('assistant'), content: z.string() }).strict(),
   z.object({ role: z.literal('user'), content: z.union([z.string(), z.array(modelPart).min(1)]) }).strict(),
-])).min(1).max(100) }).strict();
+])).min(1).max(100),
+  temperature: z.number().finite().min(0).max(2).optional(),
+  maxTokens: z.number().int().positive().optional(),
+  stop: z.array(z.string().min(1)).min(1).optional(),
+}).strict();

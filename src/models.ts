@@ -20,6 +20,11 @@ export async function callModel(ctx: Context, selection: ModelRef | undefined, r
   ensure(textBytes <= 1024 * 1024, 'INVALID_INPUT', '模型请求文本超过1MiB');
   ensure(!input.messages.slice(1).some(m => m.role === 'system'), 'INVALID_INPUT', 'system只能位于第一条消息');
   signal.throwIfAborted();
+  const controls = {
+    ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+    ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+    ...(input.stop !== undefined ? { stop: input.stop } : {}),
+  };
   const id = SessionId('sf-run-model-' + randomUUID());
   const header: SessionHeader = { id, version: SESSION_FORMAT_VERSION, createdAt: Date.now(), cwd: workspace, isSeeded: false };
   const session = Session.create(id, undefined, header), events: SessionEvent[] = [];
@@ -31,7 +36,7 @@ export async function callModel(ctx: Context, selection: ModelRef | undefined, r
   const handle = persistence ? await persistence.create(header) : undefined;
   let persisted = 0;
   async function flush() {
-    await saveJson(logPath, { header, events });
+    await saveJson(logPath, { header, events, ...(Object.keys(controls).length ? { requestedControls: controls } : {}) });
     if (handle) { await handle.append(events.slice(persisted)); await handle.flush(); persisted = events.length; }
   }
   const assembler = new BlockAssembler(), stream = new AssistantStreamAccumulator();
@@ -39,7 +44,11 @@ export async function callModel(ctx: Context, selection: ModelRef | undefined, r
   try {
     const catalog = await llm.listModels(selection.provider);
     ensure(catalog.some(m => m.id === selection.model), 'MODEL_UNAVAILABLE', '指定模型不在DSH模型目录中');
-    const prepared = await llm.prepareCall({ provider: selection.provider, model: selection.model, ...(selection.reasoningEffort ? { reasoningEffort: ReasoningEffortId(selection.reasoningEffort) } : {}) }, signal);
+    const prepared = await llm.prepareCall({
+      provider: selection.provider, model: selection.model,
+      ...(selection.reasoningEffort ? { reasoningEffort: ReasoningEffortId(selection.reasoningEffort) } : {}),
+      ...controls,
+    }, signal);
     const hasImages = input.messages.some(m => Array.isArray(m.content) && m.content.some(p => p.type === 'image_url'));
     ensure(!hasImages || prepared.inputModalities?.includes('image'), 'MODEL_IMAGE_UNSUPPORTED', '本次模型未声明支持图片，请选择DSH目录中的视觉模型');
     append('turn/start', { turn: 1 }); append('step/start', { turn: 1, step: 1 });

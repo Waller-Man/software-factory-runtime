@@ -1,5 +1,5 @@
 {
-  "name": "@software-factory/runtime", "version": "0.1.0", "private": true, "type": "module",
+  "name": "@software-factory/runtime", "version": "0.2.0", "private": true, "type": "module",
   "description": "Software factory backend task execution, progress, models and artifacts",
   "main": "./lib/index.js", "types": "./lib/index.d.ts",
   "exports": {

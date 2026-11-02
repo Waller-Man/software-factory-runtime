@@ -29,7 +29,7 @@ Run 负责管理执行，业务插件负责实际算法，SDK 帮助业务插件
 
 ## 环境与配套插件
 
-当前包版本为 **0.1.0**，开发目标为 **DSH 0.2.1-alpha.2、Node.js 24 或以上**，Cordis peer 版本为 `4.0.5-alpha.1`。其他 DSH 版本需另外核对兼容性。
+当前包版本为 **0.2.0**，开发目标为 **DSH 0.2.1-alpha.2、Node.js 24 或以上**，Cordis peer 版本为 `4.0.5-alpha.1`。其他 DSH 版本需另外核对兼容性。
 
 | 使用场景 | 需要准备的环境或服务 |
 | --- | --- |
@@ -57,7 +57,7 @@ Run SDK 是开发者项目里的接入依赖，不是需要在 DSH 插件列表�
 
 ### 2. 下载并解压 Runtime
 
-从本仓库的 **Releases／发布** 下载 `software-factory-runtime-0.1.0.zip`，解压到一个长期保留的目录，例如：
+从维护者取得 `software-factory-runtime-0.2.0.zip`，解压到一个长期保留的目录。已发布的版本也可从本仓库的 **Releases／发布** 下载，版本以发布页为准。例如：
 
 ```text
 D:\DSH-Plugins\software-factory-runtime\
@@ -111,6 +111,10 @@ D:\DSH-Plugins\software-factory-runtime\
 模型省略时，Runtime 保存发起会话已有的模型；没有模型仍可执行纯算法。显式指定时，在启动请求顶层传入 `model: {provider, model, reasoningEffort?}`，使用 DSH 原生目录中的真实 ID。模型与工作区在任务启动时固定，不随主聊天后续切换而改变。
 
 业务通过 `execution.model.call({messages})` 调用模型。图片支持公网 HTTP(S) 地址或 PNG／JPEG／GIF／WebP 的 Base64 Data URL；普通文档先由业务代码解析为文本或图片。多轮历史由业务代码显式传入，不自动维护上下文。详见[接口规范](docs/runtime-api.md)。
+
+0.2.0允许算法在每次model.call中按需提供temperature、maxTokens、stop，分别控制温度、输出上限和停止序列；三项全部可选，由业务算法提供，不增加前端设置。旧SDK 0.1.0插件省略它们时行为不变，不需要重新开发或安装SDK；新字段需要Runtime 0.2.0以上。参数不改变任务固定模型或推理强度，历史任务记录无需迁移。日志保存显式请求控制项及DSH准备后的配置。
+
+这些参数是否生效取决于DSH适配器和具体模型：本地DeepSeek适配器转发三项，但thinking模式忽略temperature；本地llm-pi-ai路径尚未转发stop。Runtime不自动关闭推理模式，不保证所有第三方路由均支持。
 
 超时通常保留默认值即可。如有需要，在 DSH 原生插件配置界面设置，单位为毫秒：
 

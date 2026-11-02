@@ -34,7 +34,7 @@ Remote命名空间sfRuntime。Host方法第一参数runtimeSession由Typert look
 | log | message、stage? | Promise<void> |
 | reportIssue | level、message、stage?、code?、fatal? | Promise<void> |
 | addArtifact | kind、name、relativePath、mime | Promise<Artifact> |
-| model.call | `{messages:[{role,content}]}`；user的content可为字符串或text／image_url数组 | `Promise<{text,usage?}>` |
+| model.call | `{messages:[{role,content}],temperature?,maxTokens?,stop?}`；user的content可为字符串或text／image_url数组 | `Promise<{text,usage?}>` |
 | registerCleanup | 清理回调 | void |
 
 ExecutionContext含runId、outputDirectory、signal、model.selection及上表方法。上下文仅交给真实正常Tool链内的本次业务执行，不是LLM参数。输入Schema使用宿主实际支持的JSON Schema子集，不兼容旧Runtime。
@@ -42,6 +42,10 @@ ExecutionContext含runId、outputDirectory、signal、model.selection及上表�
 model可选。传入则固定指定模型；省略保存来源会话已有模型；没有模型也可以执行纯算法，调用model.call时才明确报MODEL_REQUIRED。SDK不向每次请求开放换模型、API Key或服务地址。模型用量保留DSH缓存计数口径，未知值省略。
 
 ModelRef为{provider,model,reasoningEffort?}。reasoningEffort是DSH原生模型目录给出的不透明ID；省略沿用宿主默认语义，指定时启动校验其真实元数据，并在任务记录、模型请求及隔离会话header中保留。此可选字段向后兼容，不要求业务插件改写算法或SDK调用。
+
+SDK／Runtime 0.2.0为ModelRequest增加temperature?:number（有限数0～2）、maxTokens?:number（正整数）、stop?:string[]（至少一项且每项长度>0，原样保留）。这些字段由算法每次调用提供，不进入ModelRef／RunRequest／前端配置；省略时不补默认值，不从上次调用继承，不改变原0.1.0行为。temperature=0有效；未知字段继续由strict校验拒绝。参数在DSH prepareCall时提供，prepared.config同时用于隔离会话request/header与流式请求；日志JSON额外的requestedControls只在显式设置时保存。达到输出长度上限仍报MODEL_OUTPUT_TRUNCATED，不改返回结构。
+
+兼容方向：旧SDK 0.1.0插件可直接运行于新版Runtime；新参数要求Runtime>=0.2.0，旧Runtime会拒绝新字段，不静默降级。API记录版本仍为1.0，无任务迁移；现有Tool／Remote接口及卡片展示不变。底层适配器／模型另有约束：本地DeepSeek适配器转发三项，thinking模式忽略温度；本地llm-pi-ai路径未转发stop。不自动切换模型或关闭推理，不承诺任意第三方路由参数均生效。
 
 ModelRequest采用API风格：system／assistant的content为字符串；user的content为字符串或`[{type:'text',text},{type:'image_url',image_url:{url}}]`，可包含多张图片。url为公网HTTP(S)图片地址或Base64 Data URL，例如`data:image/png;base64,...`，支持PNG、JPEG、GIF、WebP。本地文件由业务代码读取后编码，不接受任意本地路径、厂商file_id或普通文档块；不新增独立上传接口。
 

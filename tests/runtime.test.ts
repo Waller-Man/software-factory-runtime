@@ -151,6 +151,7 @@ test('optional model: pure algorithm, explicit fixed route and isolated recorded
     assert.equal(run.result.text, 'synthetic model response'); assert.equal(seen.length, 1);
     assert.equal(seen[0].provider, 'test-provider'); assert.equal(seen[0].model, 'example-model');
     assert.equal(seen[0].reasoningEffort, 'high'); assert.equal(run.model.reasoningEffort, 'high');
+    for (const key of ['temperature', 'maxTokens', 'stop']) assert.equal(Object.hasOwn(seen[0], key), false, `Legacy call must not inject ${key}`);
     assert.ok(seen[0].sessionId !== f.agent.id);
     const { readdir } = await import('node:fs/promises');
     const logs = await readdir(join(f.workspace, 'outputs/runs', run.runId, 'logs'));
@@ -159,6 +160,68 @@ test('optional model: pure algorithm, explicit fixed route and isolated recorded
     const replayed = Session.create(SessionId(saved.header.id), saved.events, saved.header);
     assert.equal(replayed.requestHeader()?.config.model, 'example-model');
     assert.equal(replayed.requestHeader()?.config.reasoningEffort, 'high');
+  } finally { await f.close(); }
+});
+
+test('model controls: per-call values, omitted route defaults, validation and recorded dispatch agree', async () => {
+  const f = await fixture(), seen: GenerateOptions[] = [];
+  let truncated = false;
+  class ControlledModel extends LlmAdapter {
+    async listModels(provider: string) { return [{ provider, id: 'controlled', name: 'Synthetic controls model' }]; }
+    async resolveModel(provider: string, model: string) { return { provider, id: model, name: 'Synthetic controls model', defaultMaxTokens: 4096 }; }
+    async *stream(options: GenerateOptions) {
+      seen.push(options);
+      yield { type: 'text-delta' as const, index: 0, text: 'synthetic answer' };
+      yield { type: 'finish' as const, reason: truncated ? { kind: 'max-tokens' as const } : { kind: 'stop' as const } };
+    }
+  }
+  const messages: ModelRequest['messages'] = [{ role: 'user', content: 'Synthetic requirement' }];
+  const calls: ModelRequest[] = [
+    { messages, temperature: 0.3, maxTokens: 8192, stop: ['<END>', '\n\n'] },
+    { messages, temperature: 0, maxTokens: 1 },
+    { messages, temperature: 0.2 },
+    { messages },
+  ];
+  let requests = calls;
+  try {
+    f.ctx.llm.registerAdapter(['controls-test'], new ControlledModel());
+    await f.register('sf_test_model_controls', async (_input, execution) => {
+      for (const request of requests) await execution.model.call(request);
+      return { text: 'all calls finished' };
+    });
+    const start = async () => f.finish((await f.call('run_tool', { toolId: 'sf_test_model_controls', input: {}, model: { provider: 'controls-test', model: 'controlled' } })).runId);
+    const run = await start();
+    assert.equal(run.status, 'completed', JSON.stringify(run.issues));
+    assert.deepEqual(seen.map(o => ({ temperature: o.temperature, maxTokens: o.maxTokens, stop: o.stop })), [
+      { temperature: 0.3, maxTokens: 8192, stop: ['<END>', '\n\n'] },
+      { temperature: 0, maxTokens: 1, stop: undefined },
+      { temperature: 0.2, maxTokens: 4096, stop: undefined },
+      { temperature: undefined, maxTokens: 4096, stop: undefined },
+    ]);
+    assert.equal(Object.hasOwn(seen[3], 'temperature'), false);
+    assert.equal(Object.hasOwn(seen[3], 'stop'), false);
+    for (const [i, options] of seen.entries()) {
+      const saved = JSON.parse(await readFile(join(f.workspace, 'outputs/runs', run.runId, 'logs', `${options.sessionId}.json`), 'utf8'));
+      const replayed = Session.create(SessionId(saved.header.id), saved.events, saved.header);
+      const { messages: _messages, ...requested } = calls[i];
+      assert.deepEqual(saved.requestedControls, Object.keys(requested).length ? requested : undefined);
+      const config = replayed.requestHeader()!.config;
+      assert.deepEqual({ temperature: config.temperature, maxTokens: config.maxTokens, stop: config.stop },
+        { temperature: options.temperature, maxTokens: options.maxTokens, stop: options.stop });
+    }
+    const invalid = [{ temperature: -0.1 }, { temperature: 2.1 }, { maxTokens: 0 }, { maxTokens: 1.5 }, { stop: [] }, { stop: [''] }, { top_p: 0.9 }];
+    for (const controls of invalid) {
+      requests = [{ messages, ...controls } as ModelRequest];
+      const failed = await start();
+      assert.equal(failed.status, 'failed');
+      assert.ok(failed.issues.some((issue: any) => issue.code === 'INVALID_INPUT'), JSON.stringify(failed.issues));
+    }
+    assert.equal(seen.length, 4, 'Invalid parameters must fail before provider dispatch');
+    truncated = true; requests = [{ messages, maxTokens: 1 }];
+    const limited = await start();
+    assert.equal(limited.status, 'failed');
+    assert.ok(limited.issues.some((issue: any) => issue.code === 'MODEL_OUTPUT_TRUNCATED'));
+    assert.equal(limited.result, undefined);
   } finally { await f.close(); }
 });
 
