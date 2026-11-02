@@ -4,6 +4,12 @@
 
 **普通用户请使用 [Releases](https://github.com/Waller-Man/software-factory-runtime/releases) 中的预编译安装包，按下面的快速启动步骤安装。GitHub 的源码下载 ZIP 不等于插件安装包。** 本项目依附 DSH 运行，没有独立网页、独立启动服务或自己的数据库连接配置。
 
+## 0.2.0 更新说明
+
+- 接收算法每次模型调用提供的可选参数 `temperature`、`maxTokens`、`stop`，校验后转发给 DSH。
+- 兼容 SDK 0.1.0 的旧插件：不传参数时保持原行为，`temperature: 0` 正确保留，前端展示不变。
+- 模型日志记录算法显式参数和 DSH 准备后的配置，方便排查各阶段参数是否正确传递；实际生效仍取决于适配器和模型。
+
 ## 功能
 
 - **统一执行入口**：调用通过 Run SDK 登记的业务 Tool，每次调用创建独立 runId；启动后快速返回任务标识，供后续查询。
