@@ -2,13 +2,37 @@
 
 后端、TS SDK和WebUI嵌入执行卡已实现。类型来源：packages/contracts/src/runtime.ts；SDK入口：packages/runtime-sdk。仅取消，不提供暂停／恢复。
 
-## 上层：8个接口
+当前Runtime本地版本0.3.1，SDK 0.3.0；DSH基线仍为0.2.1-alpha.2。保留0.1／0.2业务插件的调用形状和apiVersion=1.0。
+
+## 0.3.0 模型网关与记录
+
+| protocol | HTTP路径 | getConnection返回的baseUrl后缀 |
+| --- | --- | --- |
+| openai-completions | POST /sf-runtime/model/v1/chat/completions | /sf-runtime/model/v1 |
+| openai-responses | POST /sf-runtime/model/v1/responses | /sf-runtime/model/v1 |
+| anthropic-messages | POST /sf-runtime/model/v1/messages | /sf-runtime/model |
+
+机器请求由任务临时令牌认证，OpenAI使用Bearer，Messages也接受x-api-key；不经过浏览器/api认证，拒绝带Origin的浏览器请求。真实地址和API Key从选定DSH连接读取，不接受调用者URL。连接快照在任务启动时固定（未声明协议的旧Tool在首次getConnection时解析），Key通过凭据服务逐次读取。临时令牌只在活跃Run期间有效，终态、取消、服务停用即撤销，不落盘。
+
+工具通过modelProtocols／getConnection指定请求协议，AI／用户只选服务商、模型与思考强度。Runtime 0.3.1在所选连接的已确认入口中路由，不再比较“工具协议必须等于DSH自身默认协议”；保持入站与上游请求同协议，不转换正文。DeepSeek官方标准根目录、/v1、/anthropic、/anthropic/v1对应Chat=/chat/completions、Responses=/responses、Messages=/anthropic/v1/messages；OpenAI官方根目录或/v1对应Chat=/v1/chat/completions、Responses=/v1/responses。入口表按精确origin和标准路径匹配，未登记的自定义反代保留原协议／地址，不修改域名或猜测替代路径。启动时核对业务声明的协议至少有一项可用，实际getConnection也须属于声明集合；SDK形状不变。
+
+body.model必须等于上层模型，思考字段按DSH目录及目标协议映射注入，冲突拒绝，不关闭推理。DeepSeek Chat按上层强度注入thinking和reasoning_effort，Messages使用thinking与output_config，Responses使用reasoning.effort；JSON及其他业务字段保持。三种协议外、账号登录授权和签名认证不支持，旧model.call仍走宿主适配器。目录默认值复用pi-ai@1.0.2；旧Claude预算式思考需max_tokens容纳预算。
+
+JSON格式、top_p、top_k等其余字段保留，由提供方判断能力；JSON及SSE响应保持原协议。只开放上表三个POST端点，不含Files上传、模型目录、Responses查询／删除和后台任务轮询。单次模型调用默认480000ms（8分钟），整体任务默认3600000ms（1小时），请求和响应各限64MiB；不自动重试，调用端自行遵守signal。
+
+时限配置通过DSH插件详情页的原生configForms／settings保存，界面填写分钟、存储整数毫秒，范围1000～7200000ms。Config使用volatile值，每个Run在启动时固定两项时限，保存不重启服务、不影响在途任务；显式已有值不覆盖，RunRequest.timeoutMs仍优先。网关和旧model.call均使用所属任务的模型时限。无需.env。
+
+getRun／waitRun中的可选modelCalls仅含摘要：requestId、protocol（旧call为sdk）、model、stage?、status、startedAt、finishedAt?、durationMs?、usage?、error?。详情另含request、response?及旧SDK的transcript?；认证Remote需真实会话及相同授权工作区，不能直接提交文件路径。文件为<workspace>/outputs/runs/<runId>/logs/model-calls/<requestId>.json。认证头、真实与临时Key不记录，内联图片数据省略；业务正文仍按任务材料管理。
+
+新HTTP请求不创建DSH会话；旧model.call只使用隔离内存Session，转录归任务目录，不调用宿主会话持久化服务。历史侧栏会话不自动整理或删除。WebUI增加折叠记录详情；编排原生模型和思考强度选择保持，确认执行前校验声明的modelProtocols。旧历史任务无modelCalls时照常读取。
+
+## 上层：10个接口（7个 Tool、10个 Remote）
 
 Tool与Remote复用同一服务。返回信封为`{ok:true,data}`或`{ok:false,error:{code,message}}`。Remote客户端外层还有DSH标准RemoteResult，先检查传输成功，再检查本服务ok。watchRun每条消息也是本服务信封。
 
 | Service／Remote方法 | 编排Tool | 输入request | data输出 |
 | --- | --- | --- | --- |
-| getToolContract | sf_runtime_get_tool_contract | `{toolId}` | `{toolId,description,inputSchema,supportsRun:true}` |
+| getToolContract | sf_runtime_get_tool_contract | `{toolId,model?}` | `{toolId,description,inputSchema,supportsRun:true,modelProtocols?}`；指定model时预检网关协议／凭据／思考映射 |
 | runTool | sf_runtime_run_tool | `{toolId,input,model?,timeoutMs?}` | `{runId,status:'queued'}` |
 | getRun | sf_runtime_get_run | `{runId}` | RunRecord |
 | listRuns | sf_runtime_list_runs | `{toolId?,status?,limit?,offset?}` | `{items:RunSummary[],total}` |
@@ -16,6 +40,8 @@ Tool与Remote复用同一服务。返回信封为`{ok:true,data}`或`{ok:false,e
 | cancelRun | sf_runtime_cancel_run | `{runId}` | `{runId,status}` |
 | watchRun | 无永久等待Tool | `{runId,afterSeq?}` | RunEvent流 |
 | getArtifact | sf_runtime_get_artifact | `{runId,artifactId}` | Artifact及认证downloadUrl |
+| listModelCalls | 无 | `{runId}` | `ModelCallSummary[]` |
+| getModelCall | 无 | `{runId,requestId}` | `ModelCallRecord` |
 
 Remote命名空间sfRuntime。Host方法第一参数runtimeSession由Typert lookup解析，客户端传入`runtimeSessionId`作为当前真实会话路由，第二参数request为上表对象；signal由宿主传输。RunRequest不接受身份、工作区路径、凭据或任意执行函数。
 
@@ -23,11 +49,11 @@ Remote命名空间sfRuntime。Host方法第一参数runtimeSession由Typert look
 
 状态：queued、running、cancelling、completed、failed、cancelled、interrupted。致命错误不能被下级completed覆盖。文件查看／下载仍须同一授权工作区；downloadUrl使用DSH认证且携带会话路由，不能匿名访问或传任意文件路径。
 
-## 下层：9项
+## 下层：10项
 
 | 方法／回调 | 输入 | 输出 |
 | --- | --- | --- |
-| registerRunTool(ctx,definition) | `{toolId,description,inputSchema,execute}` | 生命周期释放函数 |
+| registerRunTool(ctx,definition) | `{toolId,description,inputSchema,execute,modelProtocols?}` | 生命周期释放函数 |
 | execute(input,execution) | 真实业务输入及宿主绑定ExecutionContext | `Promise<{text?,files?:artifactId[]}>` |
 | reportStatus | status、message? | Promise<void> |
 | reportProgress | stage、stageName、progress?、message? | Promise<void> |
@@ -35,11 +61,12 @@ Remote命名空间sfRuntime。Host方法第一参数runtimeSession由Typert look
 | reportIssue | level、message、stage?、code?、fatal? | Promise<void> |
 | addArtifact | kind、name、relativePath、mime | Promise<Artifact> |
 | model.call | `{messages:[{role,content}],temperature?,maxTokens?,stop?}`；user的content可为字符串或text／image_url数组 | `Promise<{text,usage?}>` |
+| model.getConnection | `{protocol:'openai-completions'|'openai-responses'|'anthropic-messages'}` | `Promise<{baseUrl,apiKey,model,protocol}>`；apiKey为短期任务令牌 |
 | registerCleanup | 清理回调 | void |
 
 ExecutionContext含runId、outputDirectory、signal、model.selection及上表方法。上下文仅交给真实正常Tool链内的本次业务执行，不是LLM参数。输入Schema使用宿主实际支持的JSON Schema子集，不兼容旧Runtime。
 
-model可选。传入则固定指定模型；省略保存来源会话已有模型；没有模型也可以执行纯算法，调用model.call时才明确报MODEL_REQUIRED。SDK不向每次请求开放换模型、API Key或服务地址。模型用量保留DSH缓存计数口径，未知值省略。
+model可选。传入则固定指定模型；省略保存来源会话已有模型；没有模型也可以执行纯算法。声明modelProtocols的Tool须先选模型，其他Tool在调用模型时才报MODEL_REQUIRED。SDK不向每次请求开放换模型或真实上游地址、API Key；getConnection提供的是临时网关连接。旧model.call用量保留DSH缓存计数口径，HTTP用量保留上游字段，未知值省略。
 
 ModelRef为{provider,model,reasoningEffort?}。reasoningEffort是DSH原生模型目录给出的不透明ID；省略沿用宿主默认语义，指定时启动校验其真实元数据，并在任务记录、模型请求及隔离会话header中保留。此可选字段向后兼容，不要求业务插件改写算法或SDK调用。
 

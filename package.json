@@ -1,18 +1,88 @@
 {
-  "name": "@software-factory/runtime", "version": "0.2.0", "private": true, "type": "module",
+  "name": "@software-factory/runtime",
+  "version": "0.3.1",
+  "private": true,
+  "type": "module",
   "description": "Software factory backend task execution, progress, models and artifacts",
-  "main": "./lib/index.js", "types": "./lib/index.d.ts",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "exports": {
-    ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" },
-    "./types": { "types": "./lib/scope.d.ts", "default": "./lib/scope.js" },
-    "./typert": { "types": "./lib/typert.host.d.ts", "default": "./lib/typert.host.js" },
-    "./remote": { "types": "./lib/typert.remote-client.d.ts", "default": "./lib/typert.remote-client.js" },
-    "./locale/*.json": "./locale/*.json", "./icon": "./icon.svg", "./package.json": "./package.json"
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./types": {
+      "types": "./lib/scope.d.ts",
+      "default": "./lib/scope.js"
+    },
+    "./typert": {
+      "types": "./lib/typert.host.d.ts",
+      "default": "./lib/typert.host.js"
+    },
+    "./remote": {
+      "types": "./lib/typert.remote-client.d.ts",
+      "default": "./lib/typert.remote-client.js"
+    },
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
   },
-  "files": ["lib/", "lib/typert.host.js", "lib/typert.host.d.ts", "lib/typert.remote-client.js", "lib/typert.remote-client.d.ts", "README.md", "THIRD_PARTY_NOTICES.md", "docs/", "cordis.patch.yml", "locale/", "icon.svg"],
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
-  "peerDependencies": { "@deepseek-ai/cordis": "4.0.5-alpha.1", "@deepseek-ai/schemastery": "3.18.5-alpha.1", "@deepseek-ai/dsh-tools": "0.2.1-alpha.2", "@deepseek-ai/dsh-agent": "0.2.1-alpha.2", "@deepseek-ai/dsh-llm": "0.2.1-alpha.2", "@deepseek-ai/dsh-attachment": "0.2.1-alpha.2", "@deepseek-ai/dsh-http-proxy": "0.2.1-alpha.2", "@deepseek-ai/dsh-session": "0.2.1-alpha.2", "@deepseek-ai/dsh-typert-protocol": "0.2.1-alpha.2" },
-  "devDependencies": { "ipaddr.js": "2.5.0", "undici": "8.10.2" },
-  "scripts": { "build": "node scripts/build.mjs", "typecheck": "node scripts/check.mjs", "test": "node --experimental-transform-types --test tests/*.test.ts", "pack:bundle": "node scripts/pack.mjs" },
-  "engines": { "node": ">=24" }
+  "files": [
+    "lib/",
+    "lib/typert.host.js",
+    "lib/typert.host.d.ts",
+    "lib/typert.remote-client.js",
+    "lib/typert.remote-client.d.ts",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md",
+    "docs/",
+    "cordis.patch.yml",
+    "locale/",
+    "icon.svg",
+    "client.js"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web", "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-plugin-manager"]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.5-alpha.1",
+    "@deepseek-ai/schemastery": "3.18.5-alpha.1",
+    "@deepseek-ai/dsh-tools": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-agent": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-attachment": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-http-proxy": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-credentials": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-settings": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-launch-environment": "0.2.1-alpha.2",
+    "@earendil-works/pi-ai": "1.0.2"
+  },
+  "devDependencies": {
+    "ipaddr.js": "2.5.0",
+    "undici": "8.10.2"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "node scripts/check.mjs",
+    "test": "node --experimental-transform-types --test tests/*.test.ts",
+    "pack:bundle": "node scripts/pack.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
+  }
 }

@@ -11,13 +11,19 @@ import type { RunRecord, RunSummary, RunEvent, RunRequest, RunJson, RunObject, R
 import { RunError, ensure, failure, requests, progress, issue, artifact, businessResult } from './validation.ts';
 import { createRunDirectory, loadHistory, saveJson, taskFile, taskDirectory } from './files.ts';
 import { callModel } from './models.ts';
+import { ModelGateway } from './model-gateway.ts';
+import { resolveConnection, connectionKey, modelProtocols, prepareBody, routeForProtocol, type UpstreamConnection } from './model-connection.ts';
+import { recordModelCall } from './model-records.ts';
+import type { ModelProtocol, ModelCallRecord, ModelCallSummary, ModelCallRequest } from '@software-factory/contracts/runtime';
+import { resolveTimeouts, type RuntimeConfig } from './config.ts';
+export type { RuntimeConfig } from './config.ts';
 
-export interface RuntimeConfig { defaultTimeoutMs?: number; modelTimeoutMs?: number }
 interface LiveRun {
+  timeouts: Readonly<Required<RuntimeConfig>>;
   record: RunRecord; events: RunEvent[]; directory: string; workspace: string;
   controller: AbortController; write: Promise<void>; notify: Set<() => void>;
   cleanups: Array<() => void | Promise<void>>; operations: Set<Promise<unknown>>;
-  agent?: Agent; tool?: ToolDefinition; callId?: string; token?: ToolExecutionToken;
+  route?: UpstreamConnection; agent?: Agent; tool?: ToolDefinition; callId?: string; token?: ToolExecutionToken;
   stop?: 'cancelled' | 'failed' | 'interrupted'; closing?: boolean; fault?: unknown; cleanup?: Promise<void>;
 }
 const terminal = (status: string) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(status);
@@ -31,7 +37,10 @@ export class RunBackend {
   private loaded = new Map<string, Promise<void>>();
   private jobs = new Set<Promise<void>>();
   private active = true;
-  constructor(private ctx: Context, private config: RuntimeConfig) {
+  private gateway: ModelGateway;
+  private entryProtocols = new Map<string, ModelProtocol[]>();
+  constructor(private ctx: Context, private config: RuntimeConfig | (() => RuntimeConfig)) {
+    this.gateway = new ModelGateway(ctx);
     ctx.on('tools/execute', async (exec, next) => {
       const run = [...this.runs.values()].find(r => r.callId === exec.callId);
       if (!run) return next();
@@ -41,12 +50,16 @@ export class RunBackend {
     });
     ctx.on('agent/disposed', ({ agent }) => { for (const run of this.runs.values()) if (run.agent === agent && !terminal(run.record.status)) this.stop(run, 'interrupted', '发起会话已释放'); });
   }
-  registerEntry(tool: ToolDefinition): () => void {
+  registerEntry(tool: ToolDefinition, options?: { modelProtocols?: ModelProtocol[] }): () => void {
+    if (options?.modelProtocols) {
+      ensure(options.modelProtocols.length && options.modelProtocols.every(p => modelProtocols.includes(p)), "MODEL_PROTOCOL_UNSUPPORTED", "业务插件声明了不支持的模型协议");
+    }
     ensure(this.active && !this.entries.has(tool.name), 'TOOL_CONFLICT', '入口已登记或Runtime不可用');
     this.entries.set(tool.name, tool);
+    if (options?.modelProtocols) this.entryProtocols.set(tool.name, [...new Set(options.modelProtocols)]);
     return () => {
       if (this.entries.get(tool.name) !== tool) return;
-      this.entries.delete(tool.name);
+      this.entries.delete(tool.name); this.entryProtocols.delete(tool.name);
       for (const run of this.runs.values()) if (run.tool === tool && !terminal(run.record.status)) this.stop(run, 'interrupted', '业务插件已停用');
     };
   }
@@ -61,7 +74,7 @@ export class RunBackend {
       loading = (async () => {
         for (const stored of await loadHistory(workspace)) {
           if (this.runs.has(stored.record.runId)) continue;
-          const run: LiveRun = { ...stored, workspace, controller: new AbortController(), write: Promise.resolve(), notify: new Set(), cleanups: [], operations: new Set() };
+          const run: LiveRun = { ...stored, timeouts: resolveTimeouts({}), workspace, controller: new AbortController(), write: Promise.resolve(), notify: new Set(), cleanups: [], operations: new Set() };
           this.runs.set(stored.record.runId, run);
           if (!terminal(run.record.status)) await this.emit(run, 'status', { status: 'interrupted', message: '服务重启，任务未自动重跑' }, r => { r.status = 'interrupted'; r.message = '服务重启，任务未自动重跑'; r.finishedAt = now(); });
         }
@@ -76,9 +89,11 @@ export class RunBackend {
     ensure(tool && this.ctx.tools.get(toolId, agent) === tool, 'PROTOCOL_UNSUPPORTED', 'Tool未接入Run协议、不可见或已卸载');
     return tool;
   }
-  async contract(agent: Agent, toolId: string): Promise<ToolContract> {
+  async contract(agent: Agent, toolId: string, selected?: ModelRef): Promise<ToolContract> {
     await this.caller(agent); const tool = this.entry(agent, toolId);
-    return plain({ toolId, description: tool.description, inputSchema: tool.parameters as RunObject, supportsRun: true });
+    const protocols = this.entryProtocols.get(toolId);
+    if (protocols && selected) await this.checkedRoute(selected, protocols);
+    return plain({ toolId, description: tool.description, inputSchema: tool.parameters as RunObject, supportsRun: true, ...(protocols ? { modelProtocols: protocols } : {}) });
   }
   async start(agent: Agent, input: RunRequest, parent?: ToolExecutionToken): Promise<{ runId: string; status: 'queued' }> {
     const request = requests.run.parse(input) as RunRequest;
@@ -88,10 +103,14 @@ export class RunBackend {
     ensure(!errors.length, 'INPUT_VALIDATION_FAILED', errors.join('; '));
     const selected = request.model ?? this.inheritModel(agent);
     if (request.model) await this.verifyModel(request.model);
+    const protocols = this.entryProtocols.get(request.toolId);
+    if (protocols) ensure(selected, "MODEL_REQUIRED", "此业务插件需要上层选择执行模型");
+    const route = protocols ? await this.checkedRoute(selected!, protocols) : undefined;
     const runId = randomUUID(), directory = await createRunDirectory(workspace, runId, request);
     const run: LiveRun = {
+      timeouts: resolveTimeouts(typeof this.config === 'function' ? this.config() : this.config),
       record: { apiVersion: '1.0', runId, toolId: request.toolId, status: 'queued', createdAt: now(), ...(selected ? { model: { ...selected } } : {}), logs: [], issues: [], artifacts: [], lastSeq: 0 },
-      events: [], directory, workspace, controller: new AbortController(), write: Promise.resolve(), notify: new Set(), cleanups: [], operations: new Set(), agent, tool, callId: 'sf-run-' + randomUUID(),
+      events: [], directory, workspace, ...(route ? { route } : {}), controller: new AbortController(), write: Promise.resolve(), notify: new Set(), cleanups: [], operations: new Set(), agent, tool, callId: 'sf-run-' + randomUUID(),
     };
     await this.emit(run, 'status', { status: 'queued' });
     this.runs.set(runId, run);
@@ -112,8 +131,25 @@ export class RunBackend {
     ensure((await llm.listModels(model.provider)).some(m => m.id === model.model), 'MODEL_UNAVAILABLE', '指定模型不在DSH目录中');
     await llm.prepareCall({ provider: model.provider, model: model.model, ...(model.reasoningEffort ? { reasoningEffort: ReasoningEffortId(model.reasoningEffort) } : {}) }); // Metadata only.
   }
+  private async checkedRoute(model: ModelRef, protocols: ModelProtocol[]) {
+    const route = await resolveConnection(this.ctx, model);
+    const available = protocols.filter(protocol => route.protocolUrls[protocol]);
+    ensure(available.length, 'MODEL_PROTOCOL_UNSUPPORTED', `所选服务地址未登记业务所需协议入口（${protocols.join('、')}）；工具已声明协议，无需AI选择`);
+    for (const protocol of available) prepareBody(routeForProtocol(route, protocol), { model: model.model });
+    await connectionKey(this.ctx, route);
+    return route;
+  }
+  private modelOperation<T>(run: LiveRun, protocol: ModelProtocol | "sdk", input: RunJson, signal: AbortSignal, work: (record: ModelCallRecord) => Promise<T>) {
+    ensure(run.record.model, "MODEL_REQUIRED", "任务没有选择模型");
+    return recordModelCall(run.directory, run.record.model, run.record.stage, protocol, input, signal, summary =>
+      this.emit(run, "log", { message: "模型调用 " + summary.status, requestId: summary.requestId }, record => {
+        const list = record.modelCalls ??= [];
+        const at = list.findIndex(item => item.requestId === summary.requestId);
+        if (at < 0) list.push(summary); else list[at] = summary;
+      }), work);
+  }
   private async perform(run: LiveRun, request: RunRequest, parent?: ToolExecutionToken) {
-    const timer = setTimeout(() => this.stop(run, 'failed', '任务超时', 'RUN_TIMEOUT'), request.timeoutMs ?? this.config.defaultTimeoutMs ?? 1800000);
+    const timer = setTimeout(() => this.stop(run, 'failed', '任务超时', 'RUN_TIMEOUT'), request.timeoutMs ?? run.timeouts.defaultTimeoutMs);
     try {
       await this.emit(run, 'status', { status: 'running' }, r => { r.status = 'running'; r.startedAt = now(); });
       run.controller.signal.throwIfAborted();
@@ -121,7 +157,7 @@ export class RunBackend {
       const result = await this.ctx.tools.execute({ callId: ToolCallId(run.callId!), name: request.toolId, arguments: request.input, agent: run.agent, ...(parent ? { parent } : {}), signal: run.controller.signal });
       if (result.isError) throw new RunError(result.error.info?.code ?? 'HOST_TOOL_FAILED', result.error.message);
       const output = businessResult.parse(result.value) as BusinessResult;
-      run.closing = true;
+      run.closing = true; this.gateway.revoke(run.record.runId);
       await Promise.allSettled([...run.operations]);
       if (run.fault) throw run.fault;
       run.controller.signal.throwIfAborted();
@@ -136,7 +172,7 @@ export class RunBackend {
       run.controller.signal.throwIfAborted();
       await this.emit(run, 'result', final as unknown as RunJson, r => { r.result = final; r.status = 'completed'; r.finishedAt = now(); });
     } catch (error) {
-      run.closing = true;
+      run.closing = true; this.gateway.revoke(run.record.runId);
       if (!run.controller.signal.aborted) run.controller.abort(error);
       await Promise.allSettled([...run.operations]);
       let cleanupError: unknown;
@@ -147,7 +183,7 @@ export class RunBackend {
         r.issues.push({ level: 'error', ...(run.record.stage ? { stage: run.record.stage } : {}), code: cleanupError ? 'CLEANUP_FAILED' : reason.code, message: reason.message, fatal: true, time: now() });
       });
       await this.emit(run, 'status', { status, message: reason.message }, r => { r.status = status; r.message = reason.message; r.finishedAt = now(); });
-    } finally { clearTimeout(timer); run.closing = true; }
+    } finally { clearTimeout(timer); run.closing = true; this.gateway.revoke(run.record.runId); }
   }
   private cleanup(run: LiveRun): Promise<void> {
     if (run.cleanup) return run.cleanup;
@@ -160,6 +196,7 @@ export class RunBackend {
   }
   private stop(run: LiveRun, status: 'failed' | 'cancelled' | 'interrupted', message: string, code?: string) {
     if (terminal(run.record.status) || run.stop) return;
+    this.gateway.revoke(run.record.runId);
     run.stop = status; run.controller.abort(new RunError(code ?? (status === 'failed' ? 'BUSINESS_FAILED' : status.toUpperCase()), message));
     void this.emit(run, 'status', { status: 'cancelling', message }, r => { r.status = 'cancelling'; r.message = message; }).catch(error => { run.fault = error; });
     // Cleanup may be what releases a waiting external process. Start it now, not after Tool returns.
@@ -201,13 +238,29 @@ export class RunBackend {
       addArtifact: (input: ArtifactInput) => use(() => this.addArtifact(run, input)),
       registerCleanup: (callback: () => void | Promise<void>) => { ensure(!run.closing && !signal.aborted && typeof callback === 'function', 'RUN_CLOSED', '任务已停止，不能再登记资源'); run.cleanups.push(callback); },
       model: Object.freeze({ ...(run.record.model ? { selection: Object.freeze({ ...run.record.model }) } : {}), call: (input: ModelRequest) => use(async () => {
-        const modelSignal = AbortSignal.any([signal, AbortSignal.timeout(this.config.modelTimeoutMs ?? 120000)]);
-        try { return await callModel(this.ctx, run.record.model, input, run.directory, run.workspace, modelSignal); }
+        const modelSignal = AbortSignal.any([signal, AbortSignal.timeout(run.timeouts.modelTimeoutMs)]);
+        try { return await this.modelOperation(run, 'sdk', input as unknown as RunJson, modelSignal, async record => {
+          const result = await callModel(this.ctx, run.record.model, input, run.directory, run.workspace, modelSignal, transcript => { record.transcript = transcript; });
+          record.response = result as unknown as RunJson;
+          if (result.usage) record.usage = result.usage as unknown as RunJson;
+          return result;
+        }); }
         catch (error) {
           const problem = failure(error);
           await this.emit(run, 'issue', { level: 'error', ...problem }, r => { r.issues.push({ level: 'error', ...problem, ...(r.stage ? { stage: r.stage } : {}), time: now() }); });
           throw error;
         }
+      }, false), getConnection: (request: { protocol: ModelProtocol }) => use(async () => {
+        ensure(modelProtocols.includes(request.protocol), 'MODEL_PROTOCOL_UNSUPPORTED', '不支持的模型协议');
+        ensure(run.record.model, 'MODEL_REQUIRED', '请由上层选择执行模型');
+        const declared = this.entryProtocols.get(tool.name);
+        ensure(!declared || declared.includes(request.protocol), 'MODEL_PROTOCOL_UNSUPPORTED', '工具未声明此模型协议');
+        run.route ??= await resolveConnection(this.ctx, run.record.model);
+        await connectionKey(this.ctx, run.route);
+        return this.gateway.grant({ runId: run.record.runId, signal, route: routeForProtocol(run.route, request.protocol), timeoutMs: run.timeouts.modelTimeoutMs,
+          active: () => this.active && !run.closing && !terminal(run.record.status),
+          execute: (protocol, body, work) => use(() => this.modelOperation(run, protocol, body, signal, work), false),
+        }, request.protocol);
       }, false) }),
     });
   }
@@ -259,6 +312,13 @@ export class RunBackend {
     return record;
   }
   async get(agent: Agent, runId: string) { return this.recordView(agent, await this.find(agent, runId)); }
+  async listModelCalls(agent: Agent, runId: string): Promise<ModelCallSummary[]> { return plain((await this.find(agent, runId)).record.modelCalls ?? []); }
+  async getModelCall(agent: Agent, input: ModelCallRequest): Promise<ModelCallRecord> {
+    const run = await this.find(agent, input.runId);
+    ensure(run.record.modelCalls?.some(item => item.requestId === input.requestId), "MODEL_CALL_NOT_FOUND", "模型调用不存在");
+    ensure(/^[0-9a-f-]{36}$/.test(input.requestId), "INVALID_INPUT", "模型请求ID无效");
+    return JSON.parse(await readFile(await taskFile(run.directory, `logs/model-calls/${input.requestId}.json`), "utf8"));
+  }
   async list(agent: Agent, input: ListRunsRequest) {
     const filters = requests.list.parse(input), workspace = await this.caller(agent);
     const rows = [...this.runs.values()].filter(r => r.workspace === workspace && (!filters.toolId || r.record.toolId === filters.toolId) && (!filters.status || r.record.status === filters.status)).sort((a, b) => b.record.createdAt.localeCompare(a.record.createdAt));
@@ -306,6 +366,7 @@ export class RunBackend {
   async dispose() {
     for (const run of this.runs.values()) if (!terminal(run.record.status)) this.stop(run, 'interrupted', 'Runtime已停用');
     await Promise.allSettled([...this.jobs]); await Promise.allSettled([...this.runs.values()].map(r => r.write));
-    this.active = false; this.entries.clear();
+    await this.gateway.dispose();
+    this.active = false; this.entries.clear(); this.entryProtocols.clear();
   }
 }

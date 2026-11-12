@@ -6,6 +6,8 @@ import { createRequire } from 'node:module';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
+import WebServer from '@deepseek-ai/dsh-host-webserver';
+import { createServer } from 'node:http';
 import { Session, SessionId } from '@deepseek-ai/dsh-session';
 import { LlmAdapter, ToolCallId, ReasoningEffortId, type GenerateOptions } from '@deepseek-ai/dsh-llm';
 import Registry from '@deepseek-ai/dsh-typert-registry';
@@ -21,6 +23,9 @@ import remote from '../lib/typert.remote-client.js';
 import { registerRunTool, type ExecutionContext } from '../../runtime-sdk/lib/index.js';
 import * as Example from '../../runtime-sdk/examples/echo-plugin.ts';
 import { taskDirectory } from '../src/files.ts';
+import { resolveConnection, routeForProtocol, prepareBody, connectionKey } from '../src/model-connection.ts';
+// Unmodified published 0.1.0 registration binary, retained as a compatibility fixture.
+import { registerRunTool as registerLegacyTool } from './fixtures/sdk-0.1.0.mjs';
 
 async function fixture(config: Record<string, unknown> = {}) {
   const ctx = new Context();
@@ -49,8 +54,8 @@ async function fixture(config: Record<string, unknown> = {}) {
     }
     throw new Error('Task did not settle');
   }
-  async function register(toolId: string, execute: (input: any, execution: ExecutionContext) => Promise<any>) {
-    return ctx.plugin({ name: toolId, inject: ['tools', 'sfRuntime'], apply(scope: Context) { registerRunTool(scope, { toolId, description: 'synthetic_test', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute }); } });
+  async function register(toolId: string, execute: (input: any, execution: ExecutionContext) => Promise<any>, modelProtocols?: any) {
+    return ctx.plugin({ name: toolId, inject: ['tools', 'sfRuntime'], apply(scope: Context) { registerRunTool(scope, { toolId, description: 'synthetic_test', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute, ...(modelProtocols ? { modelProtocols } : {}) }); } });
   }
   return { ctx, agent, workspace, runtime, call, rpc, finish, register, async close() { removeDescriptors(); await ctx.fiber.dispose(); } };
 }
@@ -59,7 +64,7 @@ test('complete run: real Tool chain, Remote, progress, artifacts and reloadable 
   const f = await fixture();
   try {
     const example = await f.ctx.plugin(Example);
-    assert.equal(remote.descriptors.length, 8);
+    assert.equal(remote.descriptors.length, 10);
     const contract = await f.call('get_tool_contract', { toolId: 'sf_example_echo' });
     assert.equal(contract.inputSchema.required[0], 'text');
     const direct = await f.ctx.tools.execute({ callId: ToolCallId(randomUUID()), name: 'sf_example_echo', arguments: { text: 'direct' }, agent: f.agent, signal: new AbortController().signal });
@@ -86,6 +91,137 @@ test('complete run: real Tool chain, Remote, progress, artifacts and reloadable 
     assert.equal(loaded.result.text, 'hello SDK');
     assert.deepEqual(loaded.intermediateDirectories, run.intermediateDirectories);
     assert.equal((await f.call('list_runs', {})).total, 1);
+  } finally { await f.close(); }
+});
+
+test('HTTP gateway: three exact protocols, fixed route/effort, streaming, auth, records and lease revocation', async () => {
+  const f = await fixture();
+  const received: Array<{ path?: string; headers: any; body: any }> = [];
+  const waiting = Promise.withResolvers<void>(), upstreamClosed = Promise.withResolvers<void>();
+  const key = 'synthetic-provider-secret';
+  const server = createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    received.push({ path: req.url, headers: req.headers, body });
+    if (body.synthetic_wait) { res.once('close', () => upstreamClosed.resolve()); waiting.resolve(); return; }
+    if (body.synthetic_error) { res.writeHead(429, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'synthetic limit' } })); return; }
+    if (body.stream) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"type":"delta","text":"first"}\n\n');
+      res.end('data: {"usage":{"output_tokens":2}}\n\ndata: [DONE]\n\n');
+    } else { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ id: 'synthetic-response', usage: { input_tokens: 3, output_tokens: 2 } })); }
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${(server.address() as any).port}`;
+  const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'] as const;
+  const profiles = Object.fromEntries(protocols.map(protocol => [protocol, { api: protocol, baseURL: origin + '/v1', compat: { forceAdaptiveThinking: true }, models: [{ id: 'selected', reasoningEfforts: { high: 'high' } }] }]));
+  class GatewayModel extends LlmAdapter {
+    async listModels(provider: string) { return [{ provider, id: 'selected', name: 'Synthetic gateway model' }]; }
+    async resolveModel(provider: string, model: string) { return { provider, id: model, name: model, reasoning: { efforts: [{ id: ReasoningEffortId('high'), name: 'High' }] } }; }
+    async *stream(_options: GenerateOptions): AsyncGenerator<any> { assert.fail('HTTP routes must not use the DSH adapter stream'); }
+  }
+  try {
+    f.ctx.provide('settings', { configure: () => () => {}, describe: () => [{ ns: 'test-connections', value: { providers: profiles } }] } as never);
+    f.ctx.provide('credentials', { resolve: async () => ({ value: key }), readRecord: async () => ({ kind: 'api-key', key }) } as never);
+    await f.ctx.plugin(WebServer, { host: '127.0.0.1', port: 0, compression: 'none' });
+    f.ctx.llm.registerAdapter([...protocols], new GatewayModel());
+    f.ctx.llm.registerConfigurableProviders(protocols.map(provider => ({ provider, displayName: provider, settingsNs: 'test-connections', settingsPath: ['providers', provider] })));
+    for (const protocol of protocols) {
+      let connection: any;
+      const endpoint = (c: any) => c.baseUrl + (protocol === 'anthropic-messages' ? '/v1/messages' : protocol === 'openai-responses' ? '/responses' : '/chat/completions');
+      const headers = (c: any) => ({ 'content-type': 'application/json', ...(protocol === 'anthropic-messages' ? { 'x-api-key': c.apiKey, 'anthropic-version': '2023-06-01' } : { authorization: `Bearer ${c.apiKey}` }) });
+      await f.register('sf_gateway_' + protocol.replaceAll('-', '_'), async (_input, execution) => {
+        connection = await execution.model.getConnection({ protocol });
+        assert.equal(connection.model, 'selected'); assert.notEqual(connection.apiKey, key);
+        await execution.reportProgress({ stage: 'generate', stageName: '生成', progress: 30 });
+        const post = async (body: object, c = connection) => { try { return await fetch(endpoint(c), { method: 'POST', headers: headers(c), body: JSON.stringify({ model: c.model, ...body }) }); } catch (error: any) { throw new Error(`${endpoint(c)}: ${error.message}: ${String(error.cause)}`); } };
+        assert.equal((await post({}, { ...connection, apiKey: 'invalid' })).status, 401);
+        assert.equal((await post({ model: 'lower-must-not-change-model' })).status, 400);
+        assert.equal((await post({ reasoning_effort: 'low' })).status, 400);
+        const extra = { messages: [{ role: 'user', content: 'synthetic' }], input: 'synthetic', max_tokens: 20, response_format: { type: 'json_object' }, top_k: 12 };
+        const response = await post(extra); assert.equal(response.status, 200); assert.equal((await response.json() as any).id, 'synthetic-response');
+        const streamed = await post({ ...extra, stream: true });
+        assert.match(streamed.headers.get('content-type')!, /event-stream/);
+        const reader = streamed.body!.getReader(); const first = await reader.read(); assert.match(new TextDecoder().decode(first.value), /first/);
+        while (!(await reader.read()).done) { /* Drain the forwarded stream. */ }
+        const failed = await post({ synthetic_error: true }); assert.equal(failed.status, 429); assert.match(await failed.text(), /synthetic limit/);
+        return { text: 'gateway finished' };
+      }, [protocol]);
+      const toolId = 'sf_gateway_' + protocol.replaceAll('-', '_');
+      const model = { provider: protocol, model: 'selected', reasoningEffort: 'high' };
+      const contract = await f.call('get_tool_contract', { toolId, model }); assert.deepEqual(contract.modelProtocols, [protocol]);
+      const wrong = await f.ctx.tools.execute({ callId: ToolCallId(randomUUID()), name: 'sf_runtime_get_tool_contract', arguments: { toolId, model: { ...model, provider: protocols.find(p => p !== protocol) } }, agent: f.agent, signal: new AbortController().signal });
+      assert.equal((wrong as any).value.error.code, 'MODEL_PROTOCOL_UNSUPPORTED');
+      const accepted = await f.call('run_tool', { toolId, input: {}, model });
+      const run = await f.finish(accepted.runId); assert.equal(run.status, 'completed', JSON.stringify(run.issues));
+      assert.equal(run.modelCalls.length, 3); assert.equal(run.modelCalls[2].status, 'failed');
+      const summaries = await f.rpc('listModelCalls', { runId: run.runId }); assert.equal(summaries.length, 3);
+      const detail = await f.rpc('getModelCall', { runId: run.runId, requestId: summaries[0].requestId });
+      assert.equal(detail.stage, 'generate'); assert.equal(detail.request.top_k, 12); assert.deepEqual(detail.request.response_format, { type: 'json_object' });
+      const raw = await readFile(join(f.workspace, 'outputs/runs', run.runId, 'logs/model-calls', detail.requestId + '.json'), 'utf8');
+      assert.ok(!raw.includes(key)); assert.ok(!raw.includes(connection.apiKey));
+      const after = await fetch(endpoint(connection), { method: 'POST', headers: headers(connection), body: JSON.stringify({ model: 'selected' }) }); assert.equal(after.status, 401);
+      const records = received.slice(-3); assert.equal(records[0].body.model, 'selected'); assert.equal(records[0].body.top_k, 12);
+      if (protocol === 'anthropic-messages') { assert.equal(records[0].headers['x-api-key'], key); assert.equal(records[0].body.thinking.type, 'adaptive'); assert.equal(records[0].body.output_config.effort, 'high'); }
+      else { assert.equal(records[0].headers.authorization, `Bearer ${key}`); assert.equal(protocol === 'openai-responses' ? records[0].body.reasoning.effort : records[0].body.reasoning_effort, 'high'); }
+      assert.equal(records[0].path, protocol === 'anthropic-messages' ? '/v1/messages' : protocol === 'openai-responses' ? '/v1/responses' : '/v1/chat/completions');
+    }
+    assert.equal(received.length, 9, 'Rejected requests never reach the upstream');
+    let held: any;
+    await f.register('sf_gateway_cancel', async (_input, execution) => {
+      held = await execution.model.getConnection({ protocol: 'openai-completions' });
+      // A DSH edit after selection must not retarget this task's requests.
+      profiles['openai-completions'].baseURL = 'http://127.0.0.1:1/v1';
+      const response = await fetch(held.baseUrl + '/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${held.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: held.model, synthetic_wait: true }) });
+      await response.text(); return { text: 'must not finish' };
+    });
+    const heldRun = await f.call('run_tool', { toolId: 'sf_gateway_cancel', input: {}, model: { provider: 'openai-completions', model: 'selected', reasoningEffort: 'high' } });
+    await waiting.promise;
+    await f.rpc('cancelRun', { runId: heldRun.runId });
+    const cancelled = await f.finish(heldRun.runId); assert.equal(cancelled.status, 'cancelled');
+    await upstreamClosed.promise;
+    const expired = await fetch(held.baseUrl + '/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${held.apiKey}` }, body: '{}' }); assert.equal(expired.status, 401);
+    assert.equal(cancelled.modelCalls[0].status, 'cancelled');
+  } finally { await f.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('tool protocols route the selected official DeepSeek connection without using the host default protocol', async () => {
+  const f = await fixture();
+  const model = { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'low' };
+  class Model extends LlmAdapter {
+    async listModels(provider: string) { return [{ provider, id: model.model, name: 'Synthetic DeepSeek' }]; }
+    async resolveModel(provider: string, id: string) { return { provider, id, name: id, reasoning: { efforts: [{ id: ReasoningEffortId('low'), name: 'Low' }] } }; }
+    async *stream(_options: GenerateOptions): AsyncGenerator<any> { assert.fail('No real model call is needed'); }
+  }
+  try {
+    let baseURL = 'https://api.deepseek.com/anthropic';
+    f.ctx.provide('settings', { configure: () => () => {}, describe: () => [{ ns: 'native-test', value: { baseURL, apiKeyEnv: 'DEEPSEEK_API_KEY' } }] } as never);
+    f.ctx.provide('credentials', { resolve: async () => ({ value: 'synthetic-key' }) } as never);
+    f.ctx.llm.registerAdapter([model.provider], new Model());
+    f.ctx.llm.registerConfigurableProviders([{ provider: model.provider, displayName: 'DeepSeek', settingsNs: 'native-test', settingsPath: [] }]);
+    await f.ctx.plugin(WebServer, { host: '127.0.0.1', port: 0, compression: 'none' });
+    const snapshot = await resolveConnection(f.ctx, model);
+    assert.equal(snapshot.protocol, 'anthropic-messages', 'DSH can keep its own Messages default');
+    const expected = { 'openai-completions': 'https://api.deepseek.com/chat/completions', 'openai-responses': 'https://api.deepseek.com/responses', 'anthropic-messages': 'https://api.deepseek.com/anthropic/v1/messages' } as const;
+    for (const protocol of Object.keys(expected) as Array<keyof typeof expected>) {
+      const route = routeForProtocol(snapshot, protocol);
+      assert.equal(route.url, expected[protocol]); assert.equal(await connectionKey(f.ctx, route), 'synthetic-key');
+      const body = prepareBody(route, { model: model.model, response_format: { type: 'json_object' }, temperature: 0.2 });
+      assert.deepEqual(body.response_format, { type: 'json_object' }); assert.equal(body.temperature, 0.2);
+      if (protocol === 'openai-completions') { assert.equal(body.reasoning_effort, 'low'); assert.deepEqual(body.thinking, { type: 'enabled' }); }
+    }
+    await f.register('sf_native_deepseek_openai', async (_input, execution) => {
+      const connection = await execution.model.getConnection({ protocol: 'openai-completions' });
+      assert.equal(connection.protocol, 'openai-completions'); assert.equal(connection.model, model.model);
+      assert.notEqual(connection.apiKey, 'synthetic-key'); return { text: 'connection accepted' };
+    }, ['openai-completions']);
+    await f.call('get_tool_contract', { toolId: 'sf_native_deepseek_openai', model });
+    const accepted = await f.call('run_tool', { toolId: 'sf_native_deepseek_openai', input: {}, model });
+    assert.equal((await f.finish(accepted.runId)).result.text, 'connection accepted');
+    baseURL = 'http://127.0.0.1:1/custom/anthropic';
+    const custom = await resolveConnection(f.ctx, model);
+    assert.throws(() => routeForProtocol(custom, 'openai-completions'), /尚未登记/);
+    assert.equal(routeForProtocol(snapshot, 'openai-completions').url, expected['openai-completions'], 'A saved route cannot change with settings');
   } finally { await f.close(); }
 });
 
@@ -140,6 +276,14 @@ test('optional model: pure algorithm, explicit fixed route and isolated recorded
   }
   try {
     f.ctx.llm.registerAdapter(['test-provider'], new MockModel());
+    await f.ctx.plugin({ name: 'synthetic-legacy-sdk', inject: ['tools', 'sfRuntime'], apply(scope: Context) {
+      registerLegacyTool(scope, { toolId: 'sf_legacy_sdk_010', description: 'synthetic_test: published SDK 0.1.0', inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async (_input: any, execution: ExecutionContext) => { await execution.reportProgress({ stage: 'legacy', stageName: '旧SDK', progress: 50 }); return { text: (await execution.model.call({ messages: [{ role: 'user', content: 'legacy request' }] })).text }; } });
+    } });
+    const legacy = await f.finish((await f.call('run_tool', { toolId: 'sf_legacy_sdk_010', input: {}, model: { provider: 'test-provider', model: 'example-model' } })).runId);
+    assert.equal(legacy.status, 'completed'); assert.equal(legacy.result.text, 'synthetic model response');
+    assert.equal(legacy.modelCalls[0].protocol, 'sdk');
+    seen.length = 0;
     await f.ctx.plugin(Example);
     const pure = await f.call('run_tool', { toolId: 'sf_example_echo', input: { text: 'pure' } });
     assert.equal((await f.finish(pure.runId)).result.text, 'pure'); assert.equal(seen.length, 0);
@@ -153,10 +297,9 @@ test('optional model: pure algorithm, explicit fixed route and isolated recorded
     assert.equal(seen[0].reasoningEffort, 'high'); assert.equal(run.model.reasoningEffort, 'high');
     for (const key of ['temperature', 'maxTokens', 'stop']) assert.equal(Object.hasOwn(seen[0], key), false, `Legacy call must not inject ${key}`);
     assert.ok(seen[0].sessionId !== f.agent.id);
-    const { readdir } = await import('node:fs/promises');
-    const logs = await readdir(join(f.workspace, 'outputs/runs', run.runId, 'logs'));
-    assert.ok(logs.some(name => name.startsWith('sf-run-model-')));
-    const saved = JSON.parse(await readFile(join(f.workspace, 'outputs/runs', run.runId, 'logs', logs.find(n => n.startsWith('sf-run-model-'))!), 'utf8'));
+    assert.equal(run.modelCalls.length, 1);
+    const detail = await f.rpc('getModelCall', { runId: run.runId, requestId: run.modelCalls[0].requestId });
+    const saved = detail.transcript;
     const replayed = Session.create(SessionId(saved.header.id), saved.events, saved.header);
     assert.equal(replayed.requestHeader()?.config.model, 'example-model');
     assert.equal(replayed.requestHeader()?.config.reasoningEffort, 'high');
@@ -201,7 +344,8 @@ test('model controls: per-call values, omitted route defaults, validation and re
     assert.equal(Object.hasOwn(seen[3], 'temperature'), false);
     assert.equal(Object.hasOwn(seen[3], 'stop'), false);
     for (const [i, options] of seen.entries()) {
-      const saved = JSON.parse(await readFile(join(f.workspace, 'outputs/runs', run.runId, 'logs', `${options.sessionId}.json`), 'utf8'));
+      const detail = await f.rpc('getModelCall', { runId: run.runId, requestId: run.modelCalls[i].requestId });
+      const saved = detail.transcript;
       const replayed = Session.create(SessionId(saved.header.id), saved.events, saved.header);
       const { messages: _messages, ...requested } = calls[i];
       assert.deepEqual(saved.requestedControls, Object.keys(requested).length ? requested : undefined);
@@ -292,9 +436,8 @@ test('images: API-style multi-image history becomes real DSH attachments; text-o
       assert.equal(stored.ref.width, 700); assert.equal(stored.ref.height, 600);
     }
     assert.equal(seen[0].messages[2].role, 'assistant');
-    const { readdir } = await import('node:fs/promises');
-    const logDir = join(f.workspace, 'outputs/runs', run.runId, 'logs');
-    const log = await readFile(join(logDir, (await readdir(logDir))[0]), 'utf8');
+    const detail = await f.rpc('getModelCall', { runId: run.runId, requestId: run.modelCalls[0].requestId });
+    const log = JSON.stringify(detail.transcript);
     assert.ok(log.includes('attachmentId')); assert.ok(!log.includes('data:image/'));
     const saved = JSON.parse(log);
     Session.create(SessionId(saved.header.id), saved.events, saved.header);

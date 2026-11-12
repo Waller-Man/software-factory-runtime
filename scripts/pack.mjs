@@ -35,13 +35,14 @@ for (const packageDir of [sdk, runtime]) {
     }
   }
   const manifest = JSON.parse(entries.find(e => e.name === 'package.json').data.toString('utf8'));
+  if (packageDir === runtime && !files.includes('client.js')) throw new Error('Missing Runtime configuration client');
   const prefix = packageDir === sdk ? 'software-factory-runtime-sdk' : 'software-factory-runtime';
   const zip = createZip(entries.map(e => ({ ...e, name: prefix + '/' + e.name })));
   const zipName = prefix + '-' + manifest.version + '.zip'; await writeFile(join(artifacts, zipName), zip);
   // Extract the verified entries for a normal local-directory DSH install or SDK inspection.
   const release = join(artifacts, 'release', prefix);
   for (const entry of entries) { const target = join(release, entry.name); await mkdir(dirname(target), { recursive: true }); await writeFile(target, entry.data); }
-  const report = { version: manifest.version, tgz: meta.filename, zip: zipName, zipSha256: createHash('sha256').update(zip).digest('hex'), files, standaloneDeclarations: true, frontendIncluded: false };
+  const report = { version: manifest.version, tgz: meta.filename, zip: zipName, zipSha256: createHash('sha256').update(zip).digest('hex'), files, standaloneDeclarations: true, frontendIncluded: !!manifest.dsh?.client };
   await writeFile(join(artifacts, 'package-check.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ package: manifest.name, tgz: meta.filename, zip: zipName, fileCount: files.length, declarationCheck: 'passed' }));
 }

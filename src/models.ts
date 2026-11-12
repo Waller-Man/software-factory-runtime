@@ -1,16 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import { Session, SessionId, SESSION_FORMAT_VERSION, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session';
 import { BlockAssembler, AssistantStreamAccumulator, createSystemMessage, createUserMessage, createAssistantMessage, ReasoningEffortId, type Message } from '@deepseek-ai/dsh-llm';
-import type {} from '@deepseek-ai/dsh-session-persistence';
 import type { ModelRef, ModelRequest, ModelResponse } from '@software-factory/contracts/runtime';
 import { ensure, failure, modelRequest } from './validation.ts';
-import { saveJson } from './files.ts';
 import { userContent } from './images.ts';
 
 /** One isolated, tool-free DSH Session per model call. No Agent is created. */
-export async function callModel(ctx: Context, selection: ModelRef | undefined, request: ModelRequest, directory: string, workspace: string, signal: AbortSignal): Promise<ModelResponse> {
+export async function callModel(ctx: Context, selection: ModelRef | undefined, request: ModelRequest, directory: string, workspace: string, signal: AbortSignal, capture?: (value: any) => void): Promise<ModelResponse> {
   ensure(selection, 'MODEL_REQUIRED', '未选择模型，请启动任务时指定模型或使用已有会话模型');
   const llm = ctx.get('llm'); ensure(llm, 'MODEL_UNAVAILABLE', 'DSH模型服务未启用');
   const input = modelRequest.parse(request);
@@ -31,13 +28,9 @@ export async function callModel(ctx: Context, selection: ModelRef | undefined, r
   const append: typeof session.append = ((...args: Parameters<typeof session.append>) => {
     const event = (session.append as (...v: unknown[]) => SessionEvent)(...args); events.push(event); return event;
   }) as typeof session.append;
-  const logPath = join(directory, 'logs', id + '.json');
-  const persistence = ctx.get('sessionPersistence');
-  const handle = persistence ? await persistence.create(header) : undefined;
-  let persisted = 0;
   async function flush() {
-    await saveJson(logPath, { header, events, ...(Object.keys(controls).length ? { requestedControls: controls } : {}) });
-    if (handle) { await handle.append(events.slice(persisted)); await handle.flush(); persisted = events.length; }
+    // Keep an isolated in-memory transcript, never a persisted/sidebar DSH chat.
+    capture?.(JSON.parse(JSON.stringify({ header, events, ...(Object.keys(controls).length ? { requestedControls: controls } : {}) })));
   }
   const assembler = new BlockAssembler(), stream = new AssistantStreamAccumulator();
   let responseWritten = false;
@@ -90,5 +83,5 @@ export async function callModel(ctx: Context, selection: ModelRef | undefined, r
       append('turn/end', { turn: 1, reason: { kind: 'error', error: failure(error) } });
     }
     await flush(); throw error;
-  } finally { await handle?.close(); }
+  }
 }

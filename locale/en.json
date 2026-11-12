@@ -1,1 +1,1 @@
-{ "meta": { "title": "Software factory runtime", "description": "Backend task execution, progress reporting, model calls, artifacts and cancellation" } }
+{ "meta": { "title": "Software factory runtime", "description": "Task execution, progress, model calls, artifacts and cancellation with visual time limit settings" } }

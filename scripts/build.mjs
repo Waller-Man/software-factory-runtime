@@ -28,7 +28,7 @@ for (const output of outputs) {
 }
 const { build } = await import(pathToFileURL(hostRequire.resolve('tsdown'))), ts = hostRequire('typescript');
 const decorators = { name: 'runtime-standard-decorators', transform(code, id) { if (!id.endsWith('.ts') || !/^\s*@/m.test(code)) return; return { code: ts.transpileModule(code, { fileName: id, compilerOptions: { target: ts.ScriptTarget.ES2024, module: ts.ModuleKind.ESNext } }).outputText, map: null }; } };
-await build({ config: false, entry: { index: join(sdk, 'src/index.ts') }, outDir: join(sdk, 'lib'), platform: 'node', format: 'esm', clean: false, dts: false, deps: { neverBundle: [/^@deepseek-ai\//] }, outputOptions: { entryFileNames: 'index.js' } });
+await build({ config: false, entry: { index: join(sdk, 'src/index.ts') }, outDir: join(sdk, 'lib'), platform: 'node', format: 'esm', clean: false, dts: false, deps: { neverBundle: [/^@deepseek-ai\//, /^@earendil-works\//] }, outputOptions: { entryFileNames: 'index.js' } });
 for (const dir of [sdk, runtime]) {
   await mkdir(join(dir, 'lib/contracts'), { recursive: true });
   for (const file of ['runtime.js', 'runtime.d.ts']) await copyFile(join(root, 'packages/contracts/lib', file), join(dir, 'lib/contracts', file));
@@ -51,5 +51,5 @@ async function declarations(dir, packageRoot) {
 }
 for (const dir of [sdk, runtime]) await declarations(join(dir, 'lib'), dir);
 for (const entry of ['typert.host', 'typert.remote-client']) await build({ config: false, entry: { [entry]: join(stage, entry + '.js') }, outDir: join(runtime, 'lib'), platform: 'neutral', format: 'esm', clean: false, dts: false, deps: { onlyBundle: ['zod'] }, outputOptions: { entryFileNames: entry + '.js' } });
-await build({ config: false, entry: { index: join(runtime, 'src/index.ts') }, outDir: join(runtime, 'lib'), platform: 'node', format: 'esm', clean: false, dts: false, deps: { onlyBundle: ['zod', 'ipaddr.js', 'undici'], neverBundle: [/^@deepseek-ai\//] }, plugins: [decorators], outputOptions: { entryFileNames: 'index.js' } });
-console.log('Built Runtime backend, strict Remote descriptors and standalone TypeScript SDK. No frontend built.');
+await build({ config: false, entry: { index: join(runtime, 'src/index.ts') }, outDir: join(runtime, 'lib'), platform: 'node', format: 'esm', clean: false, dts: false, deps: { onlyBundle: ['zod', 'ipaddr.js', 'undici'], neverBundle: [/^@deepseek-ai\//, /^@earendil-works\//] }, plugins: [decorators], outputOptions: { entryFileNames: 'index.js' } });
+console.log('Built Runtime backend, strict Remote descriptors and standalone TypeScript SDK. Configuration client is shipped as client.js.');

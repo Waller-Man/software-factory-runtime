@@ -16,13 +16,14 @@ export const artifact = z.object({ kind: z.enum(['intermediate', 'final']), name
 export const businessResult = z.object({ text: z.string().optional(), files: z.array(runId).max(100).optional() }).strict().refine(v => !!v.text?.trim() || !!v.files?.length, '至少返回文本或一个文件');
 const json = z.json();
 export const requests = {
-  contract: z.object({ toolId: id }).strict(),
+  contract: z.object({ toolId: id, model: model.optional() }).strict(),
   run: z.object({ toolId: id, input: z.record(z.string(), json), model: model.optional(), timeoutMs: z.number().int().min(1000).max(7200000).optional() }).strict(),
   id: z.object({ runId }).strict(),
   list: z.object({ toolId: id.optional(), status: status.optional(), limit: z.number().int().min(1).max(100).optional(), offset: z.number().int().min(0).optional() }).strict(),
   wait: z.object({ runId, afterSeq: z.number().int().min(0).optional(), waitMs: z.number().int().min(1).max(30000).optional() }).strict(),
   watch: z.object({ runId, afterSeq: z.number().int().min(0).optional() }).strict(),
   artifact: z.object({ runId, artifactId: runId }).strict(),
+  modelCall: z.object({ runId, requestId: runId }).strict(),
 };
 const modelPart = z.discriminatedUnion('type', [
   z.object({ type: z.literal('text'), text: z.string() }).strict(),

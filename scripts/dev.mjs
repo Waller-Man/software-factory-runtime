@@ -7,6 +7,12 @@ export const runtime = join(root, 'packages/runtime');
 export const sdk = join(root, 'packages/runtime-sdk');
 export async function prepare() {
   await prepareHost();
+  const catalogSource = join(host, 'packages/llm/llm-pi-ai/node_modules/@earendil-works/pi-ai');
+  const catalogTarget = join(root, 'node_modules/@earendil-works/pi-ai');
+  await mkdir(join(root, 'node_modules/@earendil-works'), { recursive: true });
+  try { await lstat(catalogTarget); } catch (error) { if (error.code !== 'ENOENT') throw error; await symlink(await realpath(catalogSource), catalogTarget, process.platform === 'win32' ? 'junction' : 'dir'); }
+  if (JSON.parse(await readFile(join(catalogTarget, 'package.json'), 'utf8')).version !== '1.0.2') throw new Error('Expected host pi-ai catalog 1.0.2');
+
   const imageRequire = createRequire(join(host, 'packages/web/web-fetch-http/package.json'));
   for (const name of ['ipaddr.js', 'undici']) {
     const target = join(root, 'node_modules', name);
