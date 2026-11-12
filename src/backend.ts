@@ -16,6 +16,8 @@ import { resolveConnection, connectionKey, modelProtocols, prepareBody, routeFor
 import { recordModelCall } from './model-records.ts';
 import type { ModelProtocol, ModelCallRecord, ModelCallSummary, ModelCallRequest } from '@software-factory/contracts/runtime';
 import { resolveTimeouts, type RuntimeConfig } from './config.ts';
+import { interactionRequest, validateAnswer, ExecutionBudget, INTERACTION_TIMEOUT_MS } from './interactions.ts';
+import type { InteractionRequest, InteractionAnswer, InteractionRecord, AnswerInteractionRequest } from '@software-factory/contracts/runtime';
 export type { RuntimeConfig } from './config.ts';
 
 interface LiveRun {
@@ -25,6 +27,8 @@ interface LiveRun {
   cleanups: Array<() => void | Promise<void>>; operations: Set<Promise<unknown>>;
   route?: UpstreamConnection; agent?: Agent; tool?: ToolDefinition; callId?: string; token?: ToolExecutionToken;
   stop?: 'cancelled' | 'failed' | 'interrupted'; closing?: boolean; fault?: unknown; cleanup?: Promise<void>;
+  budget?: ExecutionBudget;
+  question?: { record: InteractionRecord; settling: boolean; resolve: (answer: InteractionAnswer) => void; reject: (error: unknown) => void };
 }
 const terminal = (status: string) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(status);
 const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
@@ -39,6 +43,7 @@ export class RunBackend {
   private active = true;
   private gateway: ModelGateway;
   private entryProtocols = new Map<string, ModelProtocol[]>();
+  private sources = new WeakMap<Agent, Agent>();
   constructor(private ctx: Context, private config: RuntimeConfig | (() => RuntimeConfig)) {
     this.gateway = new ModelGateway(ctx);
     ctx.on('tools/execute', async (exec, next) => {
@@ -48,7 +53,7 @@ export class RunBackend {
       run.token = exec.token;
       try { return await next(); } finally { run.token = undefined; }
     });
-    ctx.on('agent/disposed', ({ agent }) => { for (const run of this.runs.values()) if (run.agent === agent && !terminal(run.record.status)) this.stop(run, 'interrupted', '发起会话已释放'); });
+    ctx.on('agent/disposed', ({ agent }) => { for (const run of this.runs.values()) if ((run.agent === agent || run.record.sourceSessionId === agent.id) && !terminal(run.record.status)) this.stop(run, 'interrupted', '发起会话已释放'); });
   }
   registerEntry(tool: ToolDefinition, options?: { modelProtocols?: ModelProtocol[] }): () => void {
     if (options?.modelProtocols) {
@@ -76,7 +81,10 @@ export class RunBackend {
           if (this.runs.has(stored.record.runId)) continue;
           const run: LiveRun = { ...stored, timeouts: resolveTimeouts({}), workspace, controller: new AbortController(), write: Promise.resolve(), notify: new Set(), cleanups: [], operations: new Set() };
           this.runs.set(stored.record.runId, run);
-          if (!terminal(run.record.status)) await this.emit(run, 'status', { status: 'interrupted', message: '服务重启，任务未自动重跑' }, r => { r.status = 'interrupted'; r.message = '服务重启，任务未自动重跑'; r.finishedAt = now(); });
+          if (!terminal(run.record.status)) await this.emit(run, 'status', { status: 'interrupted', message: '服务重启，任务未自动重跑' }, r => {
+            r.status = 'interrupted'; r.message = '服务重启，任务未自动重跑'; r.finishedAt = now();
+            for (const item of r.interactions ?? []) if (item.status === 'pending') { item.status = 'cancelled'; item.finishedAt = now(); }
+          });
         }
       })();
       this.loaded.set(workspace, loading);
@@ -106,10 +114,12 @@ export class RunBackend {
     const protocols = this.entryProtocols.get(request.toolId);
     if (protocols) ensure(selected, "MODEL_REQUIRED", "此业务插件需要上层选择执行模型");
     const route = protocols ? await this.checkedRoute(selected!, protocols) : undefined;
+    const source = this.sources.get(agent) ?? agent;
+    ensure(await this.caller(source) === workspace, 'UNAUTHORIZED', '来源聊天与执行会话不属于同一工作区');
     const runId = randomUUID(), directory = await createRunDirectory(workspace, runId, request);
     const run: LiveRun = {
       timeouts: resolveTimeouts(typeof this.config === 'function' ? this.config() : this.config),
-      record: { apiVersion: '1.0', runId, toolId: request.toolId, status: 'queued', createdAt: now(), ...(selected ? { model: { ...selected } } : {}), logs: [], issues: [], artifacts: [], lastSeq: 0 },
+      record: { apiVersion: '1.0', runId, toolId: request.toolId, status: 'queued', sourceSessionId: source.id, executionSessionId: agent.id, createdAt: now(), ...(selected ? { model: { ...selected } } : {}), logs: [], issues: [], artifacts: [], lastSeq: 0 },
       events: [], directory, workspace, ...(route ? { route } : {}), controller: new AbortController(), write: Promise.resolve(), notify: new Set(), cleanups: [], operations: new Set(), agent, tool, callId: 'sf-run-' + randomUUID(),
     };
     await this.emit(run, 'status', { status: 'queued' });
@@ -149,7 +159,7 @@ export class RunBackend {
       }), work);
   }
   private async perform(run: LiveRun, request: RunRequest, parent?: ToolExecutionToken) {
-    const timer = setTimeout(() => this.stop(run, 'failed', '任务超时', 'RUN_TIMEOUT'), request.timeoutMs ?? run.timeouts.defaultTimeoutMs);
+    run.budget = new ExecutionBudget(request.timeoutMs ?? run.timeouts.defaultTimeoutMs, () => this.stop(run, 'failed', '任务超时', 'RUN_TIMEOUT'));
     try {
       await this.emit(run, 'status', { status: 'running' }, r => { r.status = 'running'; r.startedAt = now(); });
       run.controller.signal.throwIfAborted();
@@ -157,6 +167,7 @@ export class RunBackend {
       const result = await this.ctx.tools.execute({ callId: ToolCallId(run.callId!), name: request.toolId, arguments: request.input, agent: run.agent, ...(parent ? { parent } : {}), signal: run.controller.signal });
       if (result.isError) throw new RunError(result.error.info?.code ?? 'HOST_TOOL_FAILED', result.error.message);
       const output = businessResult.parse(result.value) as BusinessResult;
+      ensure(!run.question, 'INTERACTION_PENDING', '业务必须等待人工回答后再返回结果');
       run.closing = true; this.gateway.revoke(run.record.runId);
       await Promise.allSettled([...run.operations]);
       if (run.fault) throw run.fault;
@@ -178,12 +189,12 @@ export class RunBackend {
       let cleanupError: unknown;
       try { await this.cleanup(run); } catch (e) { cleanupError = e; }
       const status = cleanupError ? 'failed' : run.stop ?? 'failed';
-      const reason = failure(cleanupError ?? error);
+      const reason = failure(cleanupError ?? run.fault ?? error);
       await this.emit(run, 'issue', { level: 'error', code: cleanupError ? 'CLEANUP_FAILED' : reason.code, message: reason.message, stage: run.record.stage ?? '', fatal: true }, r => {
         r.issues.push({ level: 'error', ...(run.record.stage ? { stage: run.record.stage } : {}), code: cleanupError ? 'CLEANUP_FAILED' : reason.code, message: reason.message, fatal: true, time: now() });
       });
       await this.emit(run, 'status', { status, message: reason.message }, r => { r.status = status; r.message = reason.message; r.finishedAt = now(); });
-    } finally { clearTimeout(timer); run.closing = true; this.gateway.revoke(run.record.runId); }
+    } finally { run.budget.dispose(); run.closing = true; this.gateway.revoke(run.record.runId); }
   }
   private cleanup(run: LiveRun): Promise<void> {
     if (run.cleanup) return run.cleanup;
@@ -212,6 +223,7 @@ export class RunBackend {
     };
     return Object.freeze({
       runId: run.record.runId, outputDirectory: run.directory, signal,
+      interaction: Object.freeze({ ask: ((input: InteractionRequest) => use(() => this.ask(run, input, signal))) as ExecutionContext['interaction']['ask'] }),
       reportStatus: (status: 'running' | 'completed' | 'failed' | 'cancelled', message?: string) => use(async () => {
         ensure(['running', 'completed', 'failed', 'cancelled'].includes(status), 'INVALID_INPUT', '不支持的任务状态');
         if (status === 'failed' || status === 'cancelled') { this.stop(run, status, message ?? status); await run.write; }
@@ -302,6 +314,8 @@ export class RunBackend {
   }
   private async recordView(agent: Agent, run: LiveRun): Promise<RunRecord> {
     const record = plain(run.record);
+    record.pendingInteraction = record.interactions?.find(item => item.status === 'pending');
+    if (!record.pendingInteraction) delete record.pendingInteraction;
     record.artifacts = record.artifacts.map(f => this.artifactView(agent, record.runId, f));
     if (record.result) record.result.files = record.result.files.map(f => this.artifactView(agent, record.runId, f));
     record.intermediateDirectories = [];
@@ -312,6 +326,69 @@ export class RunBackend {
     return record;
   }
   async get(agent: Agent, runId: string) { return this.recordView(agent, await this.find(agent, runId)); }
+  /** Trusted Host integration only; never exposed as a Tool or caller-supplied session id. */
+  async bindRunSource(execution: Agent, source: Agent): Promise<() => void> {
+    ensure(await this.caller(execution) === await this.caller(source), 'UNAUTHORIZED', '来源聊天与执行会话不属于同一工作区');
+    ensure(!this.sources.has(execution), 'RUN_CONTEXT_INVALID', '执行会话已经绑定来源');
+    this.sources.set(execution, source);
+    return () => { if (this.sources.get(execution) === source) this.sources.delete(execution); };
+  }
+  async listInteractions(agent: Agent, runId: string): Promise<InteractionRecord[]> {
+    return plain((await this.find(agent, runId)).record.interactions ?? []);
+  }
+  async answerInteraction(agent: Agent, input: AnswerInteractionRequest) {
+    const run = await this.find(agent, input.runId), pending = run.question;
+    ensure(agent.id === run.record.sourceSessionId, 'UNAUTHORIZED', '请在任务来源聊天中回答');
+    ensure(!run.closing && !run.controller.signal.aborted && !terminal(run.record.status) && pending && !pending.settling && pending.record.interactionId === input.interactionId,
+      'INTERACTION_CLOSED', '问题已结束或已提交，请刷新卡片');
+    ensure(Date.now() < Date.parse(pending.record.expiresAt), 'INTERACTION_CLOSED', '问题已经超时');
+    const answer: InteractionAnswer = { ...validateAnswer(pending.record.request, input.answer), interactionId: input.interactionId };
+    await this.finishQuestion(run, pending, 'answered', answer);
+    return { interactionId: input.interactionId, status: 'answered' as const };
+  }
+  private async finishQuestion(run: LiveRun, pending: NonNullable<LiveRun['question']>, status: InteractionRecord['status'], answer?: InteractionAnswer, error?: unknown) {
+    if (pending.settling) return;
+    pending.settling = true;
+    const record: InteractionRecord = { ...pending.record, status, finishedAt: now(), ...(answer ? { answer } : {}) };
+    try {
+      await this.emit(run, 'interaction', record as unknown as RunJson, r => {
+        const index = r.interactions!.findIndex(item => item.interactionId === record.interactionId);
+        r.interactions![index] = record;
+      });
+      if (answer) pending.resolve(answer); else pending.reject(error ?? new RunError('INTERACTION_CLOSED', '问题已结束'));
+    } catch (failure) { pending.reject(failure); throw failure; }
+  }
+  private async ask(run: LiveRun, input: InteractionRequest, signal: AbortSignal): Promise<InteractionAnswer> {
+    const request = interactionRequest.parse(input) as InteractionRequest;
+    ensure(!run.question, 'INTERACTION_PENDING', '同一任务请依次提问');
+    ensure(this.ctx.get('connection'), 'INTERACTION_UNAVAILABLE', '人工交互需要DSH网页连接服务');
+    signal.throwIfAborted();
+    const timeout = request.timeoutMs ?? INTERACTION_TIMEOUT_MS;
+    const record: InteractionRecord = { interactionId: randomUUID(), request, status: 'pending', createdAt: now(), expiresAt: new Date(Date.now() + timeout).toISOString(), ...(run.record.stage ? { stage: run.record.stage } : {}) };
+    const deferred = Promise.withResolvers<InteractionAnswer>();
+    void deferred.promise.catch(() => {});
+    const pending = { record, settling: false, resolve: deferred.resolve, reject: deferred.reject };
+    run.question = pending; run.budget!.pause();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const abort = () => { void this.finishQuestion(run, pending, 'cancelled', undefined, signal.reason).catch(() => {}); };
+    try {
+      await this.emit(run, 'interaction', record as unknown as RunJson, r => { (r.interactions ??= []).push(record); });
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+      else timer = setTimeout(() => {
+        const error = new RunError('INTERACTION_TIMEOUT', '等待用户回答超时');
+        // A caller cannot catch the timeout and silently proceed without an answer.
+        void this.finishQuestion(run, pending, 'expired', undefined, error).catch(() => {});
+      }, timeout);
+      const answer = await deferred.promise;
+      signal.throwIfAborted();
+      return answer;
+    } finally {
+      clearTimeout(timer); signal.removeEventListener('abort', abort);
+      if (run.question === pending) run.question = undefined;
+      if (!signal.aborted && !run.closing) run.budget!.resume();
+    }
+  }
   async listModelCalls(agent: Agent, runId: string): Promise<ModelCallSummary[]> { return plain((await this.find(agent, runId)).record.modelCalls ?? []); }
   async getModelCall(agent: Agent, input: ModelCallRequest): Promise<ModelCallRecord> {
     const run = await this.find(agent, input.runId);

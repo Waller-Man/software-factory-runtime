@@ -24,6 +24,7 @@ import { registerRunTool, type ExecutionContext } from '../../runtime-sdk/lib/in
 import * as Example from '../../runtime-sdk/examples/echo-plugin.ts';
 import { taskDirectory } from '../src/files.ts';
 import { resolveConnection, routeForProtocol, prepareBody, connectionKey } from '../src/model-connection.ts';
+import { setTimeout as delay } from 'node:timers/promises';
 // Unmodified published 0.1.0 registration binary, retained as a compatibility fixture.
 import { registerRunTool as registerLegacyTool } from './fixtures/sdk-0.1.0.mjs';
 
@@ -64,7 +65,7 @@ test('complete run: real Tool chain, Remote, progress, artifacts and reloadable 
   const f = await fixture();
   try {
     const example = await f.ctx.plugin(Example);
-    assert.equal(remote.descriptors.length, 10);
+    assert.equal(remote.descriptors.length, 12);
     const contract = await f.call('get_tool_contract', { toolId: 'sf_example_echo' });
     assert.equal(contract.inputSchema.required[0], 'text');
     const direct = await f.ctx.tools.execute({ callId: ToolCallId(randomUUID()), name: 'sf_example_echo', arguments: { text: 'direct' }, agent: f.agent, signal: new AbortController().signal });
@@ -91,6 +92,95 @@ test('complete run: real Tool chain, Remote, progress, artifacts and reloadable 
     assert.equal(loaded.result.text, 'hello SDK');
     assert.deepEqual(loaded.intermediateDirectories, run.intermediateDirectories);
     assert.equal((await f.call('list_runs', {})).total, 1);
+  } finally { await f.close(); }
+});
+
+async function interactionUI(f: Awaited<ReturnType<typeof fixture>>) {
+  const routes = new Map<string, (request: Request) => Promise<Response>>();
+  const peer = { id: 'synthetic-human', ctx: f.ctx, dispose: async () => {} } as any;
+  f.ctx.provide('connection', { rpc: { intercept: () => () => {} }, fetch: { register: ({ path, fetch }: any) => { routes.set(path, fetch); return () => routes.delete(path); } }, admit: () => ({ peer }) } as never);
+  for (let i = 0; i < 100 && !routes.has('/api/sf-runtime/ui-session'); i++) await delay(5);
+  const response = await routes.get('/api/sf-runtime/ui-session')!(new Request('http://localhost/api/sf-runtime/ui-session', {
+    method: 'POST', headers: { host: 'localhost', origin: 'http://localhost', 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, body: '{}',
+  }));
+  const grant: any = await response.json(); assert.equal(grant.ok, true);
+  async function answer(runId: string, interactionId: string, value: any, session = f.agent.id, token = grant.data.token, caller = peer) {
+    const outer: any = await f.ctx.typertGateway.invoke({ namespace: 'sfRuntime', method: 'answerInteraction', peer: caller,
+      args: { runtimeSessionId: session, request: { runId, interactionId, answer: value }, uiToken: token } });
+    return outer;
+  }
+  async function pending(runId: string) {
+    for (let i = 0; i < 100; i++) { const run = await f.rpc('getRun', { runId }); if (run.pendingInteraction) return run; await delay(5); }
+    throw new Error('No pending question');
+  }
+  return { answer, pending };
+}
+
+test('human interaction: three modes, browser-only answers, source binding and persisted history', async () => {
+  const f = await fixture();
+  try {
+    const ui = await interactionUI(f), answers: any[] = [];
+    await f.register('sf_questions', async (_input, execution) => {
+      await execution.reportProgress({ stage: 'review', stageName: '需求审核', progress: 45 });
+      answers.push(await execution.interaction.ask({ type: 'select', question: '选择方案', options: [{ value: 'a', label: '方案一' }] }));
+      answers.push(await execution.interaction.ask({ type: 'text', question: '补充角色' }));
+      answers.push(await execution.interaction.ask({ type: 'mixed', question: '语言及要求', options: [{ value: 'zh', label: '中文' }] }));
+      return { text: '用户已确认' };
+    });
+    assert.ok(!f.ctx.tools.schemas(f.agent).some(tool => /answer.*interaction/.test(tool.name)));
+    const worker = await f.ctx.agents.create({ sessionId: SessionId(randomUUID()), meta: { cwd: f.workspace }, agentOptions: {} });
+    const runtime = f.ctx.get('sfRuntime') as unknown as { bindRunSource(execution: any, source: any): Promise<() => void> };
+    const unbind = await runtime.bindRunSource(worker.agent, f.agent);
+    const start: any = await f.ctx.typertGateway.invoke({ namespace: 'sfRuntime', method: 'runTool', args: { runtimeSessionId: worker.agent.id, request: { toolId: 'sf_questions', input: {} } } });
+    assert.equal(start.ok, true); const runId = start.data.runId; unbind();
+    let run = await ui.pending(runId), question = run.pendingInteraction.interactionId;
+    assert.equal(run.sourceSessionId, f.agent.id); assert.equal(run.executionSessionId, worker.agent.id); assert.equal(run.progress, 45);
+    assert.equal((await ui.answer(runId, question, { type: 'select', value: 'a' }, f.agent.id, 'invented')).error.code, 'UNAUTHORIZED');
+    assert.equal((await ui.answer(runId, question, { type: 'select', value: 'a' }, worker.agent.id)).error.code, 'UNAUTHORIZED');
+    assert.equal((await ui.answer(runId, question, { type: 'select', value: 'missing' })).error.code, 'INTERACTION_INVALID_ANSWER');
+    // Original wire values still undergo strict validation after the Remote decoder.
+    const invalid: any = await ui.answer(runId, question, { type: 'select', value: 'a', text: 'forbidden' });
+    assert.equal(invalid.ok, false);
+    assert.equal((await ui.answer(runId, question, { type: 'select', value: 'a' })).ok, true);
+    assert.equal((await ui.answer(runId, question, { type: 'select', value: 'a' })).error.code, 'INTERACTION_CLOSED');
+    run = await ui.pending(runId); question = run.pendingInteraction.interactionId;
+    assert.equal(run.pendingInteraction.request.type, 'text');
+    assert.equal((await ui.answer(runId, question, { type: 'text', text: '管理员' })).ok, true);
+    run = await ui.pending(runId); question = run.pendingInteraction.interactionId;
+    assert.equal((await ui.answer(runId, question, { type: 'mixed', value: 'zh', text: '保留术语' })).ok, true);
+    run = await f.finish(runId); assert.equal(run.status, 'completed'); assert.equal(run.pendingInteraction, undefined);
+    assert.deepEqual(answers.map(answer => answer.type), ['select', 'text', 'mixed']);
+    const history = await f.rpc('listInteractions', { runId }); assert.equal(history.length, 3); assert.ok(history.every((item: any) => item.status === 'answered'));
+    assert.equal(JSON.parse(await readFile(join(f.workspace, 'outputs/runs', runId, 'run.json'), 'utf8')).record.interactions[1].answer.text, '管理员');
+    await f.runtime.dispose(); await f.ctx.plugin(Runtime, {});
+    assert.equal((await f.rpc('listInteractions', { runId }))[2].answer.text, '保留术语');
+    await worker.dispose();
+  } finally { await f.close(); }
+});
+
+test('human waiting preserves execution budget; cancellation and expiration close the question', async () => {
+  const f = await fixture({ defaultTimeoutMs: 1000 });
+  try {
+    const ui = await interactionUI(f);
+    await f.register('sf_wait_user', async (_input, execution) => {
+      await execution.interaction.ask({ type: 'text', question: '请确认' }); return { text: '继续成功' };
+    });
+    let started = await f.call('run_tool', { toolId: 'sf_wait_user', input: {} });
+    let run = await ui.pending(started.runId);
+    assert.equal(Date.parse(run.pendingInteraction.expiresAt) - Date.parse(run.pendingInteraction.createdAt), 86400000);
+    await delay(1100);
+    assert.equal((await f.rpc('getRun', { runId: started.runId })).status, 'running');
+    await ui.answer(started.runId, run.pendingInteraction.interactionId, { type: 'text', text: '继续' });
+    assert.equal((await f.finish(started.runId)).status, 'completed');
+    started = await f.call('run_tool', { toolId: 'sf_wait_user', input: {} }); run = await ui.pending(started.runId);
+    await f.call('cancel_run', { runId: started.runId });
+    const cancelled = await f.finish(started.runId); assert.equal(cancelled.status, 'cancelled'); assert.equal(cancelled.interactions[0].status, 'cancelled');
+    assert.equal((await ui.answer(started.runId, run.pendingInteraction.interactionId, { type: 'text', text: '迟到回答' })).error.code, 'INTERACTION_CLOSED');
+    await f.register('sf_expire_user', async (_input, execution) => {
+      await execution.interaction.ask({ type: 'text', question: '会超时', timeoutMs: 20 }); return { text: '不应执行' };
+    });
+    started = await f.call('run_tool', { toolId: 'sf_expire_user', input: {} }); run = await f.finish(started.runId);
+    assert.equal(run.status, 'failed'); assert.equal(run.interactions[0].status, 'expired'); assert.ok(run.issues.some((issue: any) => issue.code === 'INTERACTION_TIMEOUT'));
   } finally { await f.close(); }
 });
 

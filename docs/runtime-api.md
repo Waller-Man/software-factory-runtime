@@ -2,7 +2,17 @@
 
 后端、TS SDK和WebUI嵌入执行卡已实现。类型来源：packages/contracts/src/runtime.ts；SDK入口：packages/runtime-sdk。仅取消，不提供暂停／恢复。
 
-当前Runtime本地版本0.3.1，SDK 0.3.0；DSH基线仍为0.2.1-alpha.2。保留0.1／0.2业务插件的调用形状和apiVersion=1.0。
+当前Runtime／SDK本地版本0.4.0，WebUI／编排0.1.2；DSH基线仍为0.2.1-alpha.2。保留0.1／0.2／0.3业务插件的调用形状和apiVersion=1.0。
+
+## 0.4.0 人工交互
+
+下层新增execution.interaction.ask(request)，Promise在用户提交并持久保存答案后返回。request为{type:'select'|'text'|'mixed',question,detail?,timeoutMs?}，select／mixed还需options:[{value,label,description?}]，text／mixed可带placeholder。选项value唯一、最多30项；文本非空且最多16384字符。select只返回value，text只返回text，mixed返回value?／text?且至少一项；均含interactionId及type。严格拒绝其他模式字段和未知选项。同一Run同时只有一个未决问题，业务必须await后继续。
+
+默认人工等待24小时，逐次timeoutMs可设1毫秒至7天。等待期间暂停任务执行预算而非取消信号，模型请求时限不变；超时报INTERACTION_TIMEOUT并失败，取消／停用结束等待，不自动代选。浏览器刷新不取消问题，服务重启按既有规则interrupted，遗留pending标记cancelled；不恢复算法栈，不支持附件上传。
+
+RunRecord可选增加interactions、pendingInteraction、sourceSessionId、executionSessionId；RunStatus保持原枚举，pending卡片显示“等待用户”。记录持久保存在run.json，RunEvent新增interaction类型，状态pending／answered／cancelled／expired。来源由Host对象上下文绑定：bindRunSource(executionAgent,sourceAgent)核对真实会话和同一工作区，返回临时绑定释放函数；任务启动固定来源，不接受LLM在RunRequest任意填写身份。编排只在审核确认后根据服务端记录调用此Host方法，业务仍通过正常Tool链执行。
+
+上层增加两个Remote：listInteractions(runtimeSession,{runId},signal?)返回InteractionRecord[]；answerInteraction(runtimeSession,{runId,interactionId,answer},uiToken,signal?)返回{interactionId,status:'answered'}。后者要求来源会话路由、DSH认证Remote调用以及同peer短期网页授权，无对应Tool。授权由同源POST /api/sf-runtime/ui-session、JSON空对象取得，使用DSH connection.admit验证；20分钟有效，撤销于服务停用，不进入日志、聊天或任务文件。模型网关任务令牌不能代答。问题按ID只结算一次，提交和取消均先保存再释放等待。
 
 ## 0.3.0 模型网关与记录
 
@@ -26,7 +36,7 @@ getRun／waitRun中的可选modelCalls仅含摘要：requestId、protocol（旧c
 
 新HTTP请求不创建DSH会话；旧model.call只使用隔离内存Session，转录归任务目录，不调用宿主会话持久化服务。历史侧栏会话不自动整理或删除。WebUI增加折叠记录详情；编排原生模型和思考强度选择保持，确认执行前校验声明的modelProtocols。旧历史任务无modelCalls时照常读取。
 
-## 上层：10个接口（7个 Tool、10个 Remote）
+## 上层：12个接口（7个 Tool、12个 Remote）
 
 Tool与Remote复用同一服务。返回信封为`{ok:true,data}`或`{ok:false,error:{code,message}}`。Remote客户端外层还有DSH标准RemoteResult，先检查传输成功，再检查本服务ok。watchRun每条消息也是本服务信封。
 
@@ -42,6 +52,8 @@ Tool与Remote复用同一服务。返回信封为`{ok:true,data}`或`{ok:false,e
 | getArtifact | sf_runtime_get_artifact | `{runId,artifactId}` | Artifact及认证downloadUrl |
 | listModelCalls | 无 | `{runId}` | `ModelCallSummary[]` |
 | getModelCall | 无 | `{runId,requestId}` | `ModelCallRecord` |
+| listInteractions | 无 | `{runId}` | `InteractionRecord[]` |
+| answerInteraction | 用户网页专用，无Tool | `{runId,interactionId,answer}`，另需uiToken | `{interactionId,status:'answered'}` |
 
 Remote命名空间sfRuntime。Host方法第一参数runtimeSession由Typert lookup解析，客户端传入`runtimeSessionId`作为当前真实会话路由，第二参数request为上表对象；signal由宿主传输。RunRequest不接受身份、工作区路径、凭据或任意执行函数。
 
@@ -49,7 +61,7 @@ Remote命名空间sfRuntime。Host方法第一参数runtimeSession由Typert look
 
 状态：queued、running、cancelling、completed、failed、cancelled、interrupted。致命错误不能被下级completed覆盖。文件查看／下载仍须同一授权工作区；downloadUrl使用DSH认证且携带会话路由，不能匿名访问或传任意文件路径。
 
-## 下层：10项
+## 下层：11项
 
 | 方法／回调 | 输入 | 输出 |
 | --- | --- | --- |
@@ -63,6 +75,7 @@ Remote命名空间sfRuntime。Host方法第一参数runtimeSession由Typert look
 | model.call | `{messages:[{role,content}],temperature?,maxTokens?,stop?}`；user的content可为字符串或text／image_url数组 | `Promise<{text,usage?}>` |
 | model.getConnection | `{protocol:'openai-completions'|'openai-responses'|'anthropic-messages'}` | `Promise<{baseUrl,apiKey,model,protocol}>`；apiKey为短期任务令牌 |
 | registerCleanup | 清理回调 | void |
+| interaction.ask | `{type,question,options?,placeholder?,detail?,timeoutMs?}`，按类型严格校验 | `Promise<{interactionId,type,value?,text?}>`，按类型保证有效答案 |
 
 ExecutionContext含runId、outputDirectory、signal、model.selection及上表方法。上下文仅交给真实正常Tool链内的本次业务执行，不是LLM参数。输入Schema使用宿主实际支持的JSON Schema子集，不兼容旧Runtime。
 

@@ -5,7 +5,7 @@ window.__ModuleLoader__.load({
     const React = require('react'), h = React.createElement;
     const words = {
       zh: { title: '执行时限配置', intro: '通常保留默认值即可。时间单位为分钟，保存后用于新任务。',
-        task: '任务最长运行时间（分钟）', taskHint: '包含算法、所有模型调用及产物生成；默认60分钟（1小时）。',
+        task: '任务最长运行时间（分钟）', taskHint: '包含算法、所有模型调用及产物生成；默认60分钟（1小时），等待用户回答不计入。',
         model: '单次模型请求最长时间（分钟）', modelHint: '每次模型请求的总时限；默认8分钟，持续输出也计入时间。',
         save: '保存', discard: '放弃修改', saving: '正在保存…', saved: '已保存，无需重启；运行中的任务保持原时限。',
         invalid: '请输入1秒至120分钟之间的时间，可以填写小数分钟。', loading: '正在读取配置…',
@@ -13,7 +13,7 @@ window.__ModuleLoader__.load({
         conflict: '配置已在其他页面修改，请放弃修改后重新填写。', failed: '保存失败，请检查服务端提示。',
         dirty: '有未保存的修改', usage: '无需填写环境变量或修改配置文件。单次启动提供timeoutMs时，仍可覆盖该任务的整体时限。' },
       en: { title: 'Execution time limits', intro: 'Defaults usually suffice. Enter minutes; saved values apply to new tasks.',
-        task: 'Task time limit (minutes)', taskHint: 'Includes the algorithm, model calls and output generation. Default: 60 minutes (1 hour).',
+        task: 'Task time limit (minutes)', taskHint: 'Includes the algorithm, model calls and output generation. Default: 60 minutes (1 hour); excludes human waiting.',
         model: 'Model request time limit (minutes)', modelHint: 'Total time per request, including streamed output. Default: 8 minutes.',
         save: 'Save', discard: 'Discard changes', saving: 'Saving…', saved: 'Saved without restarting. Running tasks retain their time limits.',
         invalid: 'Enter a duration from 1 second to 120 minutes. Fractional minutes are allowed.', loading: 'Loading configuration…',

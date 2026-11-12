@@ -11,6 +11,9 @@ import { RunBackend, type RuntimeConfig } from './backend.ts';
 import { ensure, failure, requests } from './validation.ts';
 import type { RuntimeSession } from './scope.ts';
 import { Config, snapshotConfig, type LiveRuntimeConfig } from './config.ts';
+import { InteractionAuthorization, INTERACTION_UI_PATH } from './interaction-authorization.ts';
+import { answerRequest } from './interactions.ts';
+import type { AnswerInteractionRequest, InteractionRecord, InteractionAccepted } from '@software-factory/contracts/runtime';
 export type { RuntimeSession, RuntimeSessionId } from './scope.ts';
 export type * from '@software-factory/contracts/runtime';
 export type { RuntimeConfig } from './backend.ts';
@@ -25,11 +28,12 @@ const schemas = {
   wait: { type: 'object', properties: { runId: { type: 'string' }, afterSeq: { type: 'integer' }, waitMs: { type: 'integer' } }, required: ['runId'], additionalProperties: false },
 } as const;
 
-/** Backend only: service, seven Tools, ten Remote methods and authenticated download. */
+/** Task service, seven Tools, twelve Remote methods and authenticated downloads. */
 export class RuntimeApi extends TypertRemoteService {
   static inject = ['tools', 'agents', 'typert'];
   static Config = Config;
   private owner = {};
+  private interactionAuthorization = new InteractionAuthorization();
   constructor(ctx: Context, private config: LiveRuntimeConfig) { super(ctx, 'sfRuntime'); }
   private backend(): RunBackend { const backend = owners.get(this.owner); ensure(backend, 'SERVICE_UNAVAILABLE', 'Runtime未就绪'); return backend; }
   protected async *[Service.init](): AsyncGenerator<() => Promise<void>> {
@@ -63,6 +67,7 @@ export class RuntimeApi extends TypertRemoteService {
       },
     }));
     const download = this.ctx.inject(['connection'], scope => {
+      scope.effect(() => scope.connection.fetch.register({ path: INTERACTION_UI_PATH, methods: ['POST'], requestBody: 'buffered', fetch: request => this.interactionAuthorization.bootstrap(request, scope.connection) }));
       scope.effect(() => scope.connection.fetch.register({ path: '/api/sf-runtime/download', methods: ['GET'], requestBody: 'buffered', fetch: async request => {
         try {
           ensure('peer' in scope.connection.admit(request), 'UNAUTHORIZED', '需要DSH认证');
@@ -75,10 +80,11 @@ export class RuntimeApi extends TypertRemoteService {
         } catch (error) { return Response.json({ ok: false, error: failure(error) }, { status: 403 }); }
       } }), 'sf-runtime: authenticated download');
     });
-    yield async () => { for (const remove of removeTools) remove(); await backend.dispose(); await download.dispose(); await settings.dispose(); removeScope(); owners.delete(this.owner); };
+    yield async () => { this.interactionAuthorization.dispose(); for (const remove of removeTools) remove(); await backend.dispose(); await download.dispose(); await settings.dispose(); removeScope(); owners.delete(this.owner); };
   }
   registerEntry(tool: ToolDefinition, options?: { modelProtocols?: ModelProtocol[] }) { return this.backend().registerEntry(tool, options); }
   executionFor(exec: ToolRunContext, tool: ToolDefinition): ExecutionContext { return this.backend().executionFor(exec, tool); }
+  bindRunSource(execution: Agent, source: Agent): Promise<() => void> { return this.backend().bindRunSource(execution, source); }
   private async invoke<I, O>(agent: Agent, request: I, schema: ZodType<I>, fn: (request: I) => Promise<O>): Promise<RuntimeResult<O>> {
     try {
       ensure(this.ctx.invocation, 'UNAUTHORIZED', 'Remote需要DSH认证调用上下文');
@@ -104,6 +110,14 @@ export class RuntimeApi extends TypertRemoteService {
   async listModelCalls(runtimeSession: RuntimeSession, request: RunIdRequest, signal?: AbortSignal): Promise<RuntimeResult<ModelCallSummary[]>> { return this.invoke(runtimeSession.agent, request, requests.id, r => this.backend().listModelCalls(runtimeSession.agent, r.runId)); }
   @Remote
   async getModelCall(runtimeSession: RuntimeSession, request: ModelCallRequest, signal?: AbortSignal): Promise<RuntimeResult<ModelCallRecord>> { return this.invoke(runtimeSession.agent, request, requests.modelCall, r => this.backend().getModelCall(runtimeSession.agent, r)); }
+  @Remote
+  async listInteractions(runtimeSession: RuntimeSession, request: RunIdRequest, signal?: AbortSignal): Promise<RuntimeResult<InteractionRecord[]>> { return this.invoke(runtimeSession.agent, request, requests.id, r => this.backend().listInteractions(runtimeSession.agent, r.runId)); }
+  @Remote
+  async answerInteraction(runtimeSession: RuntimeSession, request: AnswerInteractionRequest, uiToken: string, signal?: AbortSignal): Promise<RuntimeResult<InteractionAccepted>> {
+    try { this.interactionAuthorization.check(this.ctx.invocation, uiToken); }
+    catch (error) { return { ok: false, error: failure(error) }; }
+    return this.invoke(runtimeSession.agent, request, answerRequest, r => this.backend().answerInteraction(runtimeSession.agent, r));
+  }
   @Remote({ mode: 'stream' })
   async *watchRun(runtimeSession: RuntimeSession, request: WatchRunRequest, signal?: AbortSignal): AsyncIterable<RuntimeResult<RunEvent>> {
     try {
