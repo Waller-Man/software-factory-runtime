@@ -362,6 +362,9 @@ export class RunBackend {
     const request = interactionRequest.parse(input) as InteractionRequest;
     ensure(!run.question, 'INTERACTION_PENDING', '同一任务请依次提问');
     ensure(this.ctx.get('connection'), 'INTERACTION_UNAVAILABLE', '人工交互需要DSH网页连接服务');
+    for (const id of request.artifactIds ?? []) {
+      ensure(run.record.artifacts.some(file => file.artifactId === id), 'INTERACTION_ARTIFACT_NOT_FOUND', '审阅文件未登记或不属于当前任务');
+    }
     signal.throwIfAborted();
     const timeout = request.timeoutMs ?? INTERACTION_TIMEOUT_MS;
     const record: InteractionRecord = { interactionId: randomUUID(), request, status: 'pending', createdAt: now(), expiresAt: new Date(Date.now() + timeout).toISOString(), ...(run.record.stage ? { stage: run.record.stage } : {}) };

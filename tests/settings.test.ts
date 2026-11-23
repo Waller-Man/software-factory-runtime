@@ -67,8 +67,12 @@ test('configuration form: minute defaults, save in milliseconds and discard', as
     artifact.factory(uiRequire).apply({ effect: (fn: Function) => fn(), locale: { register: (_ns: string, data: any) => { dictionaries = data; } },
       configForms: { get: (id: string) => { assert.equal(id, 'sf-runtime'); return scope; } },
       slots: { inject: (_name: string, fn: Function) => fn(), register: (options: any, view: any) => { registration = options; Component = view; } } });
-    assert.equal(registration.key, '@software-factory/runtime');
-    await React.act(async () => root.render(React.createElement(Component, { scope, t: (key: string) => dictionaries.zh[key] })));
+    assert.equal(registration.name, 'plugins.row.config');
+    assert.equal(registration.key, '@software-factory/runtime#sf-runtime');
+    const t = (key: string) => dictionaries.zh[key];
+    await React.act(async () => root.render(React.createElement(Component, { view: 'summary', scope, t })));
+    assert.equal(dom.window.document.querySelector('form'), null, 'Summary must not render the editable form');
+    await React.act(async () => root.render(React.createElement(Component, { view: 'page', scope, t })));
     const input = (name: string) => dom.window.document.querySelector(`input[name="${name}"]`);
     const edit = async (name: string, value: string) => React.act(async () => { Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value')!.set!.call(input(name), value); input(name).dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
     assert.equal(input('defaultTimeoutMs').value, '60'); assert.equal(input('modelTimeoutMs').value, '8');

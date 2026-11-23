@@ -75,8 +75,9 @@ window.__ModuleLoader__.load({
     return { inject: ['slots', 'locale', 'configForms'], apply(ctx) {
       ctx.effect(() => ctx.locale.register('softwareFactoryRuntimeSettings', words));
       const scope = ctx.configForms.get('sf-runtime');
-      ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({ name: 'plugins.bundle.config', key: '@software-factory/runtime',
-        locale: 'softwareFactoryRuntimeSettings', inject: () => ({ scope }) }, Configuration));
+      ctx.slots.inject('plugins.row.config', () => ctx.slots.register({ name: 'plugins.row.config', key: '@software-factory/runtime#sf-runtime',
+        locale: 'softwareFactoryRuntimeSettings', inject: () => ({ scope }) }, props =>
+          props.view === 'summary' ? h('span', null, props.t('intro')) : h(Configuration, props)));
     } };
   },
 });

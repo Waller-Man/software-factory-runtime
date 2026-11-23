@@ -2,7 +2,13 @@
 
 后端、TS SDK和WebUI嵌入执行卡已实现。类型来源：packages/contracts/src/runtime.ts；SDK入口：packages/runtime-sdk。仅取消，不提供暂停／恢复。
 
-当前Runtime／SDK本地版本0.4.0，WebUI／编排0.1.2；DSH基线仍为0.2.1-alpha.2。保留0.1／0.2／0.3业务插件的调用形状和apiVersion=1.0。
+当前Runtime／SDK本地版本0.4.2，WebUI 0.1.3、编排0.1.2；DSH基线仍为0.2.1-alpha.2。新开发优先使用model.getConnection取得任务网关连接，model.call保留兼容及网关不支持的宿主连接。保留0.1／0.2／0.3／0.4业务插件的调用形状和apiVersion=1.0。
+
+## 0.4.2 人工提问附审阅文件
+
+InteractionBase追加可选artifactIds:string[]，select／text／mixed均适用。不传或空数组保持原行为，最多30个不重复UUID。下层先生成真实文件、await addArtifact登记，再传当前Run返回的artifactId；Runtime在挂起问题前核对归属，未登记或其他Run文件报INTERACTION_ARTIFACT_NOT_FOUND。问题的request及对应事件、run.json保存ID关联；getRun的artifacts仍提供文件名和认证下载引用，listInteractions保持原返回形状并携带可选字段，不新增Remote或下载接口。
+
+配套WebUI 0.1.3在当前问题及已结算交互记录下展示所关联文件，点击沿用getArtifact及认证下载路由；下载不提交答案，不把审阅文件自动放入result.files，不枚举所有中间材料。目录由业务工具打成ZIP并作为文件登记，首版不做目录浏览或用户上传。新字段需Runtime>=0.4.2，旧Runtime的严格校验会拒绝，不静默剥离重试；旧插件不使用字段可继续运行。本文新增能力由现有Run卡承载，未改为DSH原生提问面板。
 
 ## 0.4.0 人工交互
 
@@ -30,7 +36,7 @@ body.model必须等于上层模型，思考字段按DSH目录及目标协议映�
 
 JSON格式、top_p、top_k等其余字段保留，由提供方判断能力；JSON及SSE响应保持原协议。只开放上表三个POST端点，不含Files上传、模型目录、Responses查询／删除和后台任务轮询。单次模型调用默认480000ms（8分钟），整体任务默认3600000ms（1小时），请求和响应各限64MiB；不自动重试，调用端自行遵守signal。
 
-时限配置通过DSH插件详情页的原生configForms／settings保存，界面填写分钟、存储整数毫秒，范围1000～7200000ms。Config使用volatile值，每个Run在启动时固定两项时限，保存不重启服务、不影响在途任务；显式已有值不覆盖，RunRequest.timeoutMs仍优先。网关和旧model.call均使用所属任务的模型时限。无需.env。
+时限配置通过DSH“插件 → Runtime插件包 → 包含的组件 → 软件工厂执行服务”内部页面的原生configForms／settings保存，界面填写分钟、存储整数毫秒，范围1000～7200000ms。Config使用volatile值，每个Run在启动时固定两项时限，保存不重启服务、不影响在途任务；显式已有值不覆盖，RunRequest.timeoutMs仍优先。网关和旧model.call均使用所属任务的模型时限。无需.env。
 
 getRun／waitRun中的可选modelCalls仅含摘要：requestId、protocol（旧call为sdk）、model、stage?、status、startedAt、finishedAt?、durationMs?、usage?、error?。详情另含request、response?及旧SDK的transcript?；认证Remote需真实会话及相同授权工作区，不能直接提交文件路径。文件为<workspace>/outputs/runs/<runId>/logs/model-calls/<requestId>.json。认证头、真实与临时Key不记录，内联图片数据省略；业务正文仍按任务材料管理。
 

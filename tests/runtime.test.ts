@@ -113,7 +113,7 @@ async function interactionUI(f: Awaited<ReturnType<typeof fixture>>) {
     for (let i = 0; i < 100; i++) { const run = await f.rpc('getRun', { runId }); if (run.pendingInteraction) return run; await delay(5); }
     throw new Error('No pending question');
   }
-  return { answer, pending };
+  return { answer, pending, routes };
 }
 
 test('human interaction: three modes, browser-only answers, source binding and persisted history', async () => {
@@ -122,7 +122,13 @@ test('human interaction: three modes, browser-only answers, source binding and p
     const ui = await interactionUI(f), answers: any[] = [];
     await f.register('sf_questions', async (_input, execution) => {
       await execution.reportProgress({ stage: 'review', stageName: '需求审核', progress: 45 });
-      answers.push(await execution.interaction.ask({ type: 'select', question: '选择方案', options: [{ value: 'a', label: '方案一' }] }));
+      const artifactIds: string[] = [];
+      for (const name of ['review.txt', 'details.json']) {
+        await writeFile(join(execution.outputDirectory, 'intermediate', name), name === 'review.txt' ? 'synthetic review' : '{}');
+        const file = await execution.addArtifact({ kind: 'intermediate', name, relativePath: 'intermediate/' + name, mime: name.endsWith('.json') ? 'application/json' : 'text/plain' });
+        artifactIds.push(file.artifactId);
+      }
+      answers.push(await execution.interaction.ask({ type: 'select', question: '选择方案', artifactIds, options: [{ value: 'a', label: '方案一' }] }));
       answers.push(await execution.interaction.ask({ type: 'text', question: '补充角色' }));
       answers.push(await execution.interaction.ask({ type: 'mixed', question: '语言及要求', options: [{ value: 'zh', label: '中文' }] }));
       return { text: '用户已确认' };
@@ -135,6 +141,14 @@ test('human interaction: three modes, browser-only answers, source binding and p
     assert.equal(start.ok, true); const runId = start.data.runId; unbind();
     let run = await ui.pending(runId), question = run.pendingInteraction.interactionId;
     assert.equal(run.sourceSessionId, f.agent.id); assert.equal(run.executionSessionId, worker.agent.id); assert.equal(run.progress, 45);
+    assert.equal(run.result, undefined, 'Review files are available before a final result');
+    assert.deepEqual(run.pendingInteraction.request.artifactIds, run.artifacts.map((file: any) => file.artifactId));
+    for (const artifactId of run.pendingInteraction.request.artifactIds) {
+      const file = await f.rpc('getArtifact', { runId, artifactId });
+      assert.ok(file.downloadUrl.includes('artifactId=' + artifactId));
+      const response = await ui.routes.get('/api/sf-runtime/download')!(new Request('http://localhost' + file.downloadUrl));
+      assert.equal(response.status, 200); assert.ok((await response.text()).length);
+    }
     assert.equal((await ui.answer(runId, question, { type: 'select', value: 'a' }, f.agent.id, 'invented')).error.code, 'UNAUTHORIZED');
     assert.equal((await ui.answer(runId, question, { type: 'select', value: 'a' }, worker.agent.id)).error.code, 'UNAUTHORIZED');
     assert.equal((await ui.answer(runId, question, { type: 'select', value: 'missing' })).error.code, 'INTERACTION_INVALID_ANSWER');
@@ -149,12 +163,38 @@ test('human interaction: three modes, browser-only answers, source binding and p
     run = await ui.pending(runId); question = run.pendingInteraction.interactionId;
     assert.equal((await ui.answer(runId, question, { type: 'mixed', value: 'zh', text: '保留术语' })).ok, true);
     run = await f.finish(runId); assert.equal(run.status, 'completed'); assert.equal(run.pendingInteraction, undefined);
+    assert.deepEqual(run.result.files, [], 'Review files are not automatically final deliveries');
     assert.deepEqual(answers.map(answer => answer.type), ['select', 'text', 'mixed']);
     const history = await f.rpc('listInteractions', { runId }); assert.equal(history.length, 3); assert.ok(history.every((item: any) => item.status === 'answered'));
     assert.equal(JSON.parse(await readFile(join(f.workspace, 'outputs/runs', runId, 'run.json'), 'utf8')).record.interactions[1].answer.text, '管理员');
     await f.runtime.dispose(); await f.ctx.plugin(Runtime, {});
-    assert.equal((await f.rpc('listInteractions', { runId }))[2].answer.text, '保留术语');
+    const restored = await f.rpc('listInteractions', { runId });
+    assert.equal(restored[2].answer.text, '保留术语');
+    assert.deepEqual(restored[0].request.artifactIds, run.artifacts.map((file: any) => file.artifactId));
     await worker.dispose();
+  } finally { await f.close(); }
+});
+
+test('review questions reject unregistered files and files owned by another Run', async () => {
+  const f = await fixture();
+  try {
+    await interactionUI(f);
+    await f.ctx.plugin(Example);
+    const produced = await f.call('run_tool', { toolId: 'sf_example_echo', input: { text: 'synthetic foreign file' } });
+    const otherRun = await f.finish(produced.runId);
+    let artifactId = otherRun.artifacts[0].artifactId;
+    await f.register('sf_invalid_review', async (_input, execution) => {
+      await execution.interaction.ask({ type: 'text', question: '审阅文件', artifactIds: [artifactId] });
+      return { text: '不应继续' };
+    });
+    for (const id of [artifactId, randomUUID()]) {
+      artifactId = id;
+      const start = await f.call('run_tool', { toolId: 'sf_invalid_review', input: {} });
+      const failed = await f.finish(start.runId);
+      assert.equal(failed.status, 'failed');
+      assert.ok(failed.issues.some((issue: any) => issue.code === 'INTERACTION_ARTIFACT_NOT_FOUND'));
+      assert.equal(failed.interactions?.length ?? 0, 0);
+    }
   } finally { await f.close(); }
 });
 
