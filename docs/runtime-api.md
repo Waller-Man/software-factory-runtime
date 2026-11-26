@@ -2,7 +2,7 @@
 
 后端、TS SDK和WebUI嵌入执行卡已实现。类型来源：packages/contracts/src/runtime.ts；SDK入口：packages/runtime-sdk。仅取消，不提供暂停／恢复。
 
-当前Runtime／SDK本地版本0.4.2，WebUI 0.1.3、编排0.1.2；DSH基线仍为0.2.1-alpha.2。新开发优先使用model.getConnection取得任务网关连接，model.call保留兼容及网关不支持的宿主连接。保留0.1／0.2／0.3／0.4业务插件的调用形状和apiVersion=1.0。
+本文覆盖 Runtime 0.4.3、SDK 0.4.2、WebUI 0.1.3 及以上和编排 0.1.2。DSH 基线为 0.2.1-alpha.2。新开发优先使用 model.getConnection 取得任务网关连接，model.call 保留兼容及网关不支持的宿主连接。保留 0.1／0.2／0.3／0.4 业务插件的调用形状和 apiVersion=1.0。
 
 ## 0.4.2 人工提问附审阅文件
 
@@ -36,7 +36,7 @@ body.model必须等于上层模型，思考字段按DSH目录及目标协议映�
 
 JSON格式、top_p、top_k等其余字段保留，由提供方判断能力；JSON及SSE响应保持原协议。只开放上表三个POST端点，不含Files上传、模型目录、Responses查询／删除和后台任务轮询。单次模型调用默认480000ms（8分钟），整体任务默认3600000ms（1小时），请求和响应各限64MiB；不自动重试，调用端自行遵守signal。
 
-时限配置通过DSH“插件 → Runtime插件包 → 包含的组件 → 软件工厂执行服务”内部页面的原生configForms／settings保存，界面填写分钟、存储整数毫秒，范围1000～7200000ms。Config使用volatile值，每个Run在启动时固定两项时限，保存不重启服务、不影响在途任务；显式已有值不覆盖，RunRequest.timeoutMs仍优先。网关和旧model.call均使用所属任务的模型时限。无需.env。
+在 DSH 的“插件 → Runtime 插件包 → 包含的组件 → 软件工厂执行服务”里填写分钟数。Runtime 0.4.3 起，任务总时限的范围为 1000 至 259200000 毫秒（最长 72 小时），单次模型请求的范围为 1000 至 7200000 毫秒（最长 2 小时）。Runtime 在任务启动时固定两项时限，保存配置后只影响新任务，无需重启。启动请求传入 `RunRequest.timeoutMs` 时，以该值为准，范围与任务总时限相同。模型网关和 `model.call()` 均使用所属任务的模型时限。
 
 getRun／waitRun中的可选modelCalls仅含摘要：requestId、protocol（旧call为sdk）、model、stage?、status、startedAt、finishedAt?、durationMs?、usage?、error?。详情另含request、response?及旧SDK的transcript?；认证Remote需真实会话及相同授权工作区，不能直接提交文件路径。文件为<workspace>/outputs/runs/<runId>/logs/model-calls/<requestId>.json。认证头、真实与临时Key不记录，内联图片数据省略；业务正文仍按任务材料管理。
 

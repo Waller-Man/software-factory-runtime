@@ -70,7 +70,11 @@ test('complete run: real Tool chain, Remote, progress, artifacts and reloadable 
     assert.equal(contract.inputSchema.required[0], 'text');
     const direct = await f.ctx.tools.execute({ callId: ToolCallId(randomUUID()), name: 'sf_example_echo', arguments: { text: 'direct' }, agent: f.agent, signal: new AbortController().signal });
     assert.equal(direct.isError, true, 'SDK Tool must require an authentic Run context');
-    const accepted = await f.rpc('runTool', { toolId: 'sf_example_echo', input: { text: 'hello SDK' } });
+    const request = { toolId: 'sf_example_echo', input: { text: 'hello SDK' } };
+    const rejected: any = await f.ctx.typertGateway.invoke({ namespace: 'sfRuntime', method: 'runTool', args: { runtimeSessionId: f.agent.id, request: { ...request, timeoutMs: 259200001 } } });
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, 'INVALID_INPUT');
+    const accepted = await f.rpc('runTool', { ...request, timeoutMs: 259200000 });
     assert.equal(accepted.status, 'queued');
     const run = await f.finish(accepted.runId);
     assert.equal(run.status, 'completed'); assert.equal(run.result.text, 'hello SDK');

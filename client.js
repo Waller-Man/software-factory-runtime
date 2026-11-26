@@ -3,12 +3,14 @@ window.__ModuleLoader__.load({
   id: '@software-factory/runtime',
   factory(require) {
     const React = require('react'), h = React.createElement;
+    const maxMinutes = { defaultTimeoutMs: 72 * 60, modelTimeoutMs: 120 };
     const words = {
       zh: { title: '执行时限配置', intro: '通常保留默认值即可。时间单位为分钟，保存后用于新任务。',
         task: '任务最长运行时间（分钟）', taskHint: '包含算法、所有模型调用及产物生成；默认60分钟（1小时），等待用户回答不计入。',
         model: '单次模型请求最长时间（分钟）', modelHint: '每次模型请求的总时限；默认8分钟，持续输出也计入时间。',
         save: '保存', discard: '放弃修改', saving: '正在保存…', saved: '已保存，无需重启；运行中的任务保持原时限。',
-        invalid: '请输入1秒至120分钟之间的时间，可以填写小数分钟。', loading: '正在读取配置…',
+        taskInvalid: '请输入1秒至4320分钟（72小时）的任务时限，可以填写小数分钟。',
+        modelInvalid: '请输入1秒至120分钟的模型请求时限，可以填写小数分钟。', loading: '正在读取配置…',
         unavailable: '请启用软件工厂执行服务及DSH原生设置服务。', readOnly: '当前连接没有保存配置的权限。',
         conflict: '配置已在其他页面修改，请放弃修改后重新填写。', failed: '保存失败，请检查服务端提示。',
         dirty: '有未保存的修改', usage: '无需填写环境变量或修改配置文件。单次启动提供timeoutMs时，仍可覆盖该任务的整体时限。' },
@@ -16,7 +18,8 @@ window.__ModuleLoader__.load({
         task: 'Task time limit (minutes)', taskHint: 'Includes the algorithm, model calls and output generation. Default: 60 minutes (1 hour); excludes human waiting.',
         model: 'Model request time limit (minutes)', modelHint: 'Total time per request, including streamed output. Default: 8 minutes.',
         save: 'Save', discard: 'Discard changes', saving: 'Saving…', saved: 'Saved without restarting. Running tasks retain their time limits.',
-        invalid: 'Enter a duration from 1 second to 120 minutes. Fractional minutes are allowed.', loading: 'Loading configuration…',
+        taskInvalid: 'Enter a task time limit from 1 second to 4320 minutes (72 hours). Fractional minutes are allowed.',
+        modelInvalid: 'Enter a model request time limit from 1 second to 120 minutes. Fractional minutes are allowed.', loading: 'Loading configuration…',
         unavailable: 'Enable Runtime and the native DSH settings service.', readOnly: 'This connection cannot save configuration.',
         conflict: 'Another page changed the configuration. Discard changes and edit again.', failed: 'Could not save. Check the server message.',
         dirty: 'Unsaved changes', usage: 'No environment variable or configuration file editing is needed. A task timeoutMs can still override its total limit.' },
@@ -44,7 +47,12 @@ window.__ModuleLoader__.load({
       async function save(event) {
         event.preventDefault(); if (disabled || !dirty || conflict) return;
         const values = Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, Math.round(Number(value) * 60000)]));
-        if (Object.values(draft).some(value => !value.trim()) || Object.values(values).some(value => !Number.isFinite(value) || value < 1000 || value > 7200000)) { setError(t('invalid')); return; }
+        for (const [key, value] of Object.entries(values)) {
+          if (!Number.isFinite(value) || value < 1000 || value > maxMinutes[key] * 60000) {
+            setError(t(key === 'defaultTimeoutMs' ? 'taskInvalid' : 'modelInvalid'));
+            return;
+          }
+        }
         setSaving(true); setError(''); setNotice('');
         try {
           const accepted = await scope.mutate(Object.entries(values).map(([key, value]) => ({ op: 'set', path: [key], value })), revision);
@@ -57,7 +65,7 @@ window.__ModuleLoader__.load({
       }
       function field(key, title, hint) {
         return h('div', { key }, h('label', { htmlFor: id + key }, t(title)),
-          h('input', { id: id + key, name: key, type: 'number', min: 1 / 60, max: 120, step: 'any', value: draft[key], disabled,
+          h('input', { id: id + key, name: key, type: 'number', min: 1 / 60, max: maxMinutes[key], step: 'any', value: draft[key], disabled,
             'aria-describedby': id + key + '-hint', onChange: event => { setDraft({ ...draft, [key]: event.target.value }); setError(''); setNotice(''); } }),
           h('p', { id: id + key + '-hint' }, t(hint)));
       }

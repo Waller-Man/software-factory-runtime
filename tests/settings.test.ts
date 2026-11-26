@@ -38,14 +38,21 @@ test('native settings: defaults, save without restart, snapshot and persistence'
     assert.deepEqual(before, { defaultTimeoutMs: 3600000, modelTimeoutMs: 480000 });
     const descriptor = ctx.settings.describe().find(item => item.ns === 'sf-runtime')!;
     assert.equal(descriptor.autoGenerate, false);
-    await ctx.settings.mutate('sf-runtime', [{ op: 'set', path: ['modelTimeoutMs'], value: 240000 }], descriptor.revision);
+    await ctx.settings.mutate('sf-runtime', [
+      { op: 'set', path: ['defaultTimeoutMs'], value: 259200000 },
+      { op: 'set', path: ['modelTimeoutMs'], value: 240000 },
+    ], descriptor.revision);
     assert.equal(entry.fiber, fiber, 'Saving must not restart or cancel Runtime');
-    assert.equal(snapshotConfig(fiber.config as never).modelTimeoutMs, 240000);
-    assert.equal(before.modelTimeoutMs, 480000, 'Existing task snapshots retain their original value');
+    assert.deepEqual(snapshotConfig(fiber.config as never), { defaultTimeoutMs: 259200000, modelTimeoutMs: 240000 });
+    assert.deepEqual(before, { defaultTimeoutMs: 3600000, modelTimeoutMs: 480000 }, 'Existing task snapshots retain their original values');
     assert.match(await readFile(profile.patchPath, 'utf8'), /240000/);
   } finally { await ctx.fiber.dispose(); }
   const restarted = await start();
-  try { assert.equal(restarted.settings.describe().find(item => item.ns === 'sf-runtime')!.value.modelTimeoutMs, 240000); }
+  try {
+    const value = restarted.settings.describe().find(item => item.ns === 'sf-runtime')!.value;
+    assert.equal(value.defaultTimeoutMs, 259200000);
+    assert.equal(value.modelTimeoutMs, 240000);
+  }
   finally { await restarted.fiber.dispose(); }
 });
 
@@ -75,13 +82,20 @@ test('configuration form: minute defaults, save in milliseconds and discard', as
     await React.act(async () => root.render(React.createElement(Component, { view: 'page', scope, t })));
     const input = (name: string) => dom.window.document.querySelector(`input[name="${name}"]`);
     const edit = async (name: string, value: string) => React.act(async () => { Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value')!.set!.call(input(name), value); input(name).dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+    const submit = async () => React.act(async () => dom.window.document.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })));
     assert.equal(input('defaultTimeoutMs').value, '60'); assert.equal(input('modelTimeoutMs').value, '8');
+    await edit('defaultTimeoutMs', '4320');
     await edit('modelTimeoutMs', '4');
-    await React.act(async () => dom.window.document.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })));
-    assert.equal(saves, 1); assert.equal(state.value.modelTimeoutMs, 240000); assert.match(dom.window.document.body.textContent, /已保存/);
-    await edit('modelTimeoutMs', '0');
-    await React.act(async () => dom.window.document.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })));
-    assert.equal(saves, 1); assert.match(dom.window.document.body.textContent, /请输入/);
+    await submit();
+    assert.equal(saves, 1); assert.deepEqual(state.value, { defaultTimeoutMs: 259200000, modelTimeoutMs: 240000 });
+    assert.match(dom.window.document.body.textContent, /已保存/);
+    await edit('defaultTimeoutMs', '4321');
+    await submit();
+    assert.equal(saves, 1); assert.match(dom.window.document.querySelector('[role="alert"]').textContent, /4320分钟/);
+    await edit('defaultTimeoutMs', '4320');
+    await edit('modelTimeoutMs', '121');
+    await submit();
+    assert.equal(saves, 1); assert.match(dom.window.document.querySelector('[role="alert"]').textContent, /120分钟/);
     await React.act(async () => dom.window.document.querySelector('button[type="button"]').click());
     assert.equal(input('modelTimeoutMs').value, '4');
   } finally {

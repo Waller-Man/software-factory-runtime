@@ -4,10 +4,11 @@ import type { Volatile } from '@deepseek-ai/cordis';
 export interface RuntimeConfig { defaultTimeoutMs?: number; modelTimeoutMs?: number }
 export type LiveRuntimeConfig = { [K in keyof Required<RuntimeConfig>]: Volatile<number> };
 export const DEFAULT_TIMEOUT_MS = 3600000;
+export const MAX_RUN_TIMEOUT_MS = 72 * 60 * 60 * 1000;
 export const MODEL_TIMEOUT_MS = 480000;
 export const Config = z.object({
-  defaultTimeoutMs: z.number().step(1).min(1000).max(7200000).default(DEFAULT_TIMEOUT_MS)
-    .description('任务实际执行时限，单位毫秒；默认1小时，等待用户回答不计入。').volatile(),
+  defaultTimeoutMs: z.number().step(1).min(1000).max(MAX_RUN_TIMEOUT_MS).default(DEFAULT_TIMEOUT_MS)
+    .description('任务实际执行时限，单位毫秒。默认1小时，最多72小时，等待用户回答不计入。').volatile(),
   modelTimeoutMs: z.number().step(1).min(1000).max(7200000).default(MODEL_TIMEOUT_MS)
     .description('每次模型请求最长时间，单位毫秒；默认8分钟。').volatile(),
 });

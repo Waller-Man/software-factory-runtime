@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAX_RUN_TIMEOUT_MS } from './config.ts';
 export class RunError extends Error { constructor(readonly code: string, message: string) { super(message); this.name = 'RunError'; } }
 export function ensure(value: unknown, code: string, message: string): asserts value { if (!value) throw new RunError(code, message); }
 export function failure(error: unknown) {
@@ -17,7 +18,7 @@ export const businessResult = z.object({ text: z.string().optional(), files: z.a
 const json = z.json();
 export const requests = {
   contract: z.object({ toolId: id, model: model.optional() }).strict(),
-  run: z.object({ toolId: id, input: z.record(z.string(), json), model: model.optional(), timeoutMs: z.number().int().min(1000).max(7200000).optional() }).strict(),
+  run: z.object({ toolId: id, input: z.record(z.string(), json), model: model.optional(), timeoutMs: z.number().int().min(1000).max(MAX_RUN_TIMEOUT_MS).optional() }).strict(),
   id: z.object({ runId }).strict(),
   list: z.object({ toolId: id.optional(), status: status.optional(), limit: z.number().int().min(1).max(100).optional(), offset: z.number().int().min(0).optional() }).strict(),
   wait: z.object({ runId, afterSeq: z.number().int().min(0).optional(), waitMs: z.number().int().min(1).max(30000).optional() }).strict(),
